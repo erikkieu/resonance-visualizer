@@ -37,6 +37,11 @@ import displayFrag from '../shaders/fluid/display.frag?raw';
  * perceptual space, so mixes stay colourful like paint (purple + cyan
  * passes through blue) instead of averaging to grey as linear RGB does.
  *
+ * Gold is a separate metallic layer drawn on top of the paint, so it stays
+ * brilliant instead of mixing with the blues: high notes deposit gold (more
+ * when loud), a share of pours carry a gold accent at any pitch, and some
+ * treble specks are gold flecks.
+ *
  * Motion model: everything is driven by one slowly smoothed value, `drive`
  * (music presence x loudness). With no music the simulation clock runs at
  * ~10% and only faint ambient pours keep the paint drifting; as the music
@@ -56,12 +61,12 @@ const COLOUR = {
   // pitchHeight -> colour (sRGB), sampled with smooth monotone interpolation
   RAMP: [
     [0.0, '#2a0a4a'], // deep purple
-    [0.25, '#0a1a5c'], // dark navy
-    [0.45, '#1e78d6'], // ocean blue ...
-    [0.55, '#2fc4d8'], // ... into cyan
-    [0.7, '#8fd8f0'], // light blue ...
-    [0.8, '#b8f0e0'], // ... into mint
-    [1.0, '#fff8dc'], // white with a hint of warm yellow
+    [0.25, '#0f2a8f'], // navy / cobalt
+    [0.45, '#1a8cff'], // bright azure ...
+    [0.55, '#22d3ff'], // ... into bright cyan
+    [0.7, '#8ae3ff'], // light blue ...
+    [0.8, '#b8f6e6'], // ... into mint
+    [1.0, '#fff8dc'], // white with a hint of warm yellow (bright gold comes from the gold layer)
   ],
   JITTER: 0.05, // random +/- offset along the ramp, fixed per pour
   // loudness 0..1 -> multipliers [quiet, loud]
@@ -71,6 +76,18 @@ const COLOUR = {
   HUE_SHIFT_DEG: 15, // max hue shift from the dominant pitch class (0 = off)
   HUE_SMOOTHING: 0.3, // s
   DYE_DISSIPATION: 0.1, // per simulated second, the same for every channel so colours never drift
+  VIBRANCE: 1.15, // chroma boost at display, makes blues and golds pop (1 = off)
+  // metallic gold layer, drawn on top of the paint
+  GOLD: {
+    BRIGHT: '#ffd23f', // bright yellow gold
+    DEEP: '#f0a01e', // rich deep gold
+    HEIGHT_START: 0.7, // pitch height where pours start to carry gold...
+    FROM_HEIGHT: 0.5, // ...up to this much gold per unit of paint at the top
+    ACCENT_CHANCE: 0.14, // share of pours with a gold accent at any pitch
+    ACCENT_AMOUNT: [0.9, 1.4],
+    FLECKS: 0.4, // share of treble specks that are gold
+    DISSIPATION: 0.16, // per simulated second
+  },
 };
 // ============================================================================
 
@@ -201,6 +218,7 @@ export default class Scene1Fluid extends SceneBase {
     this._hue = [1, 0, 0, 0, 1, 0, 0, 0, 1]; // hue rotation matrix (sRGB)
     this._rgb = [0, 0, 0];
     this.note = 2; // dominant pitch class behind the hue shift
+    this.sheen = 0;
   }
 
   async init(renderer) {
@@ -243,6 +261,11 @@ export default class Scene1Fluid extends SceneBase {
         fragmentShader: noiseGLSL + displayFrag,
         uniforms: {
           uDye: { value: null },
+          uGold: { value: null },
+          cGold: { value: new THREE.Color(COLOUR.GOLD.BRIGHT) },
+          cGoldDeep: { value: new THREE.Color(COLOUR.GOLD.DEEP) },
+          uSheen: { value: 0 },
+          uVibrance: { value: COLOUR.VIBRANCE },
           uDyeTexel: { value: new THREE.Vector2() },
           uAspect: { value: 1 },
           uTime: { value: 0 },
@@ -274,6 +297,7 @@ export default class Scene1Fluid extends SceneBase {
 
     this.velocity = this._resizeDouble(this.velocity, sw, sh, halfRG);
     this.dye = this._resizeDouble(this.dye, dw, dh, halfRGBA);
+    this.gold = this._resizeDouble(this.gold, dw, dh, halfRG);
     this.pressure = this._resizeDouble(this.pressure, sw, sh, halfR);
     if (!this.divergence || this.divergence.width !== sw || this.divergence.height !== sh) {
       this.divergence?.dispose();
@@ -380,11 +404,24 @@ export default class Scene1Fluid extends SceneBase {
   /**
    * Queues a splat. (x, y) in 0..1 uv, (vx, vy) impulse in sim texels / s
    * (scaled so the look is resolution independent), `dye` is premultiplied
-   * colour + amount (or null), `fade` opens a hole in the paint (cells).
+   * colour + amount (or null), `fade` opens a hole in the paint (cells),
+   * `gold` is [bright, deep] gold amounts (or null).
    */
-  splat(x, y, vx, vy, dye, radius, fade = 0) {
+  splat(x, y, vx, vy, dye, radius, fade = 0, gold = null) {
     const k = this.simHeight / 128;
-    this.queue.push({ x, y, vx: vx * k, vy: vy * k, dye, fade, radius: this._radius(radius) });
+    this.queue.push({ x, y, vx: vx * k, vy: vy * k, dye, fade, gold, radius: this._radius(radius) });
+  }
+
+  /** Gold for a pour: high notes gild (more when loud), accents gild at any pitch. */
+  _goldFor(g, w) {
+    const G = COLOUR.GOLD;
+    let amount = (g.goldAccent ?? 0) * w;
+    if (g.amount) {
+      const high = smoothstep(G.HEIGHT_START, 1, this.height + g.jitter);
+      amount += g.amount * w * G.FROM_HEIGHT * high * lerp(0.6, 1.2, this.loud);
+    }
+    if (amount <= 0) return null;
+    return [amount * (1 - g.goldTone), amount * g.goldTone];
   }
 
   _initialPour() {
@@ -393,6 +430,12 @@ export default class Scene1Fluid extends SceneBase {
       const a = Math.random() * Math.PI * 2;
       const dye = this._dye(0, rand(0.8, 1.4), rand(0.15, 0.9));
       this.splat(rand(0.1, 0.9), rand(0.1, 0.9), Math.cos(a) * 260, Math.sin(a) * 260, dye, rand(0.006, 0.014));
+    }
+    // and a few gold accents
+    for (let i = 0; i < 3; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const tone = Math.random() * 0.6;
+      this.splat(rand(0.15, 0.85), rand(0.15, 0.85), Math.cos(a) * 200, Math.sin(a) * 200, null, rand(0.003, 0.006), 0, [0.9 * (1 - tone), 0.9 * tone]);
     }
     for (let i = 0; i < 70; i++) {
       this._flushSplats();
@@ -426,6 +469,18 @@ export default class Scene1Fluid extends SceneBase {
       u.uMin.value = -1e6; // Oklab a/b are signed; amounts only ever grow or fade
       this.pass.render(this.renderer, this.mats.splat, this.dye.write);
       this.dye.swap();
+
+      if (batch.some((s) => s.gold || s.fade)) {
+        batch.forEach((s, i) => {
+          if (s.gold) u.uColors.value[i].set(s.gold[0], s.gold[1], 0, 0);
+          else u.uColors.value[i].set(0, 0, 0, 0);
+          fade[i] = s.fade * 0.6;
+        });
+        u.uTarget.value = this.gold.read.texture;
+        u.uMin.value = 0;
+        this.pass.render(this.renderer, this.mats.splat, this.gold.write);
+        this.gold.swap();
+      }
     }
   }
 
@@ -486,6 +541,12 @@ export default class Scene1Fluid extends SceneBase {
     adv.dissipation.value.setScalar(COLOUR.DYE_DISSIPATION);
     pass.render(r, m.advection, this.dye.write);
     this.dye.swap();
+
+    // 9. advect the gold layer
+    adv.uSource.value = this.gold.read.texture;
+    adv.dissipation.value.setScalar(COLOUR.GOLD.DISSIPATION);
+    pass.render(r, m.advection, this.gold.write);
+    this.gold.swap();
   }
 
   // -------------------------------------------------------------- motion
@@ -520,7 +581,7 @@ export default class Scene1Fluid extends SceneBase {
    * given, the pour follows that moving nozzle.
    */
   _gust(g) {
-    this.gusts.push({ age: 0, jitter: (Math.random() * 2 - 1) * COLOUR.JITTER, ...g });
+    this.gusts.push({ age: 0, jitter: (Math.random() * 2 - 1) * COLOUR.JITTER, goldTone: Math.random() * 0.6, ...g });
   }
 
   _updateGusts(sdt) {
@@ -545,8 +606,9 @@ export default class Scene1Fluid extends SceneBase {
         vx = g.vx * c - g.vy * sn;
         vy = g.vx * sn + g.vy * c;
       }
-      const dye = g.fade ? null : this._dye(g.jitter, g.amount * w);
-      this.splat(x, y, vx * k, vy * k, dye, g.radius, g.fade ? g.fade * w : 0);
+      const dye = g.fade || !g.amount ? null : this._dye(g.jitter, g.amount * w);
+      const gold = g.fade ? null : this._goldFor(g, w);
+      this.splat(x, y, vx * k, vy * k, dye, g.radius, g.fade ? g.fade * w : 0, gold);
     }
     this.gusts = this.gusts.filter((g) => g.age < g.duration);
   }
@@ -576,7 +638,8 @@ export default class Scene1Fluid extends SceneBase {
       const ty = Math.cos(e.phase) * Math.sign(e.speed);
       const vx = (tx * 0.8 + (0.5 - e.x) * 1.2 + rand(-0.3, 0.3)) * strength;
       const vy = (ty * 0.8 + (0.5 - e.y) * 1.2 + rand(-0.3, 0.3)) * strength;
-      this._gust({ emitter: e, vx, vy, amount: rand(0.7, 1.3), radius, duration });
+      const accent = Math.random() < COLOUR.GOLD.ACCENT_CHANCE ? rand(...COLOUR.GOLD.ACCENT_AMOUNT) : 0;
+      this._gust({ emitter: e, vx, vy, amount: rand(0.7, 1.3), goldAccent: accent, radius, duration });
     };
     const anyEmitter = () => this.emitters[(Math.random() * 3) | 0];
 
@@ -641,7 +704,8 @@ export default class Scene1Fluid extends SceneBase {
     while (this.acc.treble > 1) {
       this.acc.treble -= 1;
       const a = Math.random() * Math.PI * 2;
-      this._gust({ x: rand(0.05, 0.95), y: rand(0.05, 0.95), vx: Math.cos(a) * 60, vy: Math.sin(a) * 60, amount: rand(1.2, 2), radius: rand(0.00005, 0.00016), duration: 0.4 });
+      const gilded = Math.random() < COLOUR.GOLD.FLECKS;
+      this._gust({ x: rand(0.05, 0.95), y: rand(0.05, 0.95), vx: Math.cos(a) * 60, vy: Math.sin(a) * 60, amount: gilded ? 0 : rand(1.2, 2), goldAccent: gilded ? rand(1.2, 2) : 0, radius: rand(0.00005, 0.00016), duration: 0.4 });
     }
 
     // Cells: small fades open holes in the paint; the lacing shader then
@@ -678,6 +742,9 @@ export default class Scene1Fluid extends SceneBase {
     this.velocityDissipation = VELOCITY_DISSIPATION.calm + (VELOCITY_DISSIPATION.active - VELOCITY_DISSIPATION.calm) * Math.min(1, drive * 1.6);
 
     const u = this.mats.display.uniforms;
+    // gilded highlights swell with the music, gently
+    this.sheen += (audio.presence * audio.energy - this.sheen) * (1 - Math.exp(-dt / 1.2));
+    u.uSheen.value = this.sheen;
     u.uTime.value = t;
     u.uTreble.value = treble;
     u.uBeat.value = audio.beat * drive;
@@ -703,12 +770,14 @@ export default class Scene1Fluid extends SceneBase {
   render(target) {
     const u = this.mats.display.uniforms;
     u.uDye.value = this.dye.read.texture;
+    u.uGold.value = this.gold.read.texture;
     this.pass.render(this.renderer, this.mats.display, target);
   }
 
   dispose() {
     this.velocity?.dispose();
     this.dye?.dispose();
+    this.gold?.dispose();
     this.pressure?.dispose();
     this.divergence?.dispose();
     this.curl?.dispose();

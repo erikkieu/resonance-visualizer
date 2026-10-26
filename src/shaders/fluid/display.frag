@@ -7,8 +7,15 @@
 //   - an unsharp mask against the neighbours keeps borders between pours crisp
 //   - dark "lacing" veins are drawn where the colour changes quickly
 //   - the paint amount is a height field for glossy lighting
+// uGold is a separate metallic layer (r = bright gold, g = deep gold) drawn
+// on top, so gold stays brilliant instead of mixing into the blues.
 
 uniform sampler2D uDye;
+uniform sampler2D uGold;
+uniform vec3 cGold;
+uniform vec3 cGoldDeep;
+uniform float uSheen;     // gilded highlights, brighter when the music is loud
+uniform float uVibrance;  // chroma boost (1 = as stored)
 uniform vec2 uDyeTexel;
 uniform float uAspect;
 uniform float uTime;
@@ -44,6 +51,11 @@ vec3 oklabToLinear(vec3 c) {
   ), 0.0);
 }
 
+float goldAt(vec2 uv) {
+  vec2 g = max(texture2D(uGold, uv).rg, 0.0);
+  return g.x + g.y;
+}
+
 // Paint thickness (0..1) from the paint amount.
 float thickness(float a) {
   return 1.0 - exp(-a * 1.4);
@@ -58,9 +70,14 @@ void main() {
   vec4 dT = dyeAt(vUv + vec2(0.0, e.y));
 
   // --- height field and normal (central differences on paint thickness)
-  float h = thickness(d.a);
-  float hL = thickness(dL.a), hR = thickness(dR.a);
-  float hB = thickness(dB.a), hT = thickness(dT.a);
+  vec2 g = max(texture2D(uGold, vUv).rg, 0.0);
+  float gold = g.x + g.y;
+  // gold is a little thicker than the acrylic, so it stands proud of it
+  float h = thickness(d.a + gold * 1.2);
+  float hL = thickness(dL.a + goldAt(vUv - vec2(e.x, 0.0)) * 1.2);
+  float hR = thickness(dR.a + goldAt(vUv + vec2(e.x, 0.0)) * 1.2);
+  float hB = thickness(dB.a + goldAt(vUv - vec2(0.0, e.y)) * 1.2);
+  float hT = thickness(dT.a + goldAt(vUv + vec2(0.0, e.y)) * 1.2);
   vec3 n = normalize(vec3((hL - hR) * 5.0, (hB - hT) * 5.0, 1.0));
 
   // --- paint colour, with crisper borders between pours
@@ -69,7 +86,13 @@ void main() {
   vec3 mean = (cL + cR + cB + cT) * 0.25;
   vec3 lab = c + (c - mean) * 0.9;
   lab.x = clamp(lab.x, 0.0, 1.0);
+  lab.yz *= uVibrance;
   vec3 paint = oklabToLinear(lab);
+
+  // gold covers the acrylic where there is about as much of it as paint
+  // (a crisp edge, and thin traces not at all, so it never tints into beige)
+  float metal = smoothstep(0.36, 0.5, gold / (gold + 0.5 * d.a + 0.03)) * smoothstep(0.06, 0.16, gold);
+  vec3 goldCol = mix(cGold, cGoldDeep, g.y / max(gold, 1e-4));
 
   // --- lacing: veins where the colour changes quickly between pours
   // (measured in Oklab, so the veins follow perceived colour differences)
@@ -88,6 +111,7 @@ void main() {
   float veins = clamp(lace * 0.8 + rim * 0.7, 0.0, 1.0) * smoothstep(0.08, 0.35, h);
   // veins are a dark ultramarine, faintly tinted by the paint around them
   vec3 veinCol = mix(cDeep, mix(cNavy, paint, 0.3) * 0.5, 0.5);
+  veinCol = mix(veinCol, cGoldDeep * 0.35, smoothstep(0.1, 0.5, gold) * 0.5); // bronze next to gold
   col = mix(col, veinCol, veins);
 
   // --- glossy acrylic lighting
@@ -98,12 +122,20 @@ void main() {
   float spec = pow(max(dot(n, H), 0.0), 70.0);
   float sheen = pow(1.0 - n.z, 1.5); // grazing slopes catch a soft sheen of their own colour
   col *= diff;
-  col += vec3(0.85, 0.95, 1.0) * spec * 0.55 * cover;
-  col += paint * sheen * 0.25 * cover;
+  col += vec3(0.85, 0.95, 1.0) * spec * 0.55 * cover * (1.0 - metal);
+  col += paint * sheen * 0.25 * cover * (1.0 - metal);
+
+  // gilded metal: a reflection that shifts with the surface slope plus a
+  // broad warm highlight, so the gold glints as the paint flows
+  float env = 0.5 + 0.5 * sin(dot(n.xy, vec2(9.0, 13.0)) + q.y * 3.0 + uTime * 0.2);
+  vec3 goldLit = goldCol * (0.85 + 0.55 * env) + cGold * pow(max(dot(n, H), 0.0), 24.0) * (0.6 + 0.8 * uSheen);
+  goldLit += vec3(1.0, 0.93, 0.72) * spec * (0.5 + 0.7 * uSheen);
+  col = mix(col, goldLit * diff, metal * cover);
 
   // treble makes the brightest paint glint
   float bright = dot(paint, vec3(0.2126, 0.7152, 0.0722));
-  col += cWhite * bright * cover * uTreble * 0.12 * (0.5 + 0.5 * sin(uTime * 7.0 + q.x * 40.0));
+  float glint = cover * uTreble * 0.12 * (0.5 + 0.5 * sin(uTime * 7.0 + q.x * 40.0));
+  col += (cWhite * bright + cGold * metal * 1.5) * glint;
 
   // gentle vignette keeps the eye in the centre
   vec2 vq = vUv - 0.5;

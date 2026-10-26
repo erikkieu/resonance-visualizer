@@ -113,8 +113,8 @@ A real Navier–Stokes solver in the style of Pavel Dobryakov's *WebGL Fluid Sim
 | Height | Colour |
 | --- | --- |
 | 0 | deep purple `#2a0a4a` |
-| 0.25 | dark navy `#0a1a5c` |
-| ~0.5 | ocean blue → cyan |
+| 0.25 | navy / cobalt `#0f2a8f` |
+| ~0.5 | bright azure → bright cyan |
 | ~0.75 | light blue → mint |
 | 1 | white with a hint of warm yellow `#fff8dc` |
 
@@ -123,7 +123,9 @@ A real Navier–Stokes solver in the style of Pavel Dobryakov's *WebGL Fluid Sim
 - **Hue shift**: the dominant pitch class adds a shift of up to ±15°, weighted by note strength.
 - **Long pours**: colour is applied as the paint is released, so a long pour paints the melody's movement.
 - **No recolouring**: paint already on the canvas keeps its colour and new paint mixes in.
-- **Settings**: everything is in the `COLOUR` config at the top of `Scene1Fluid.js` (ramp stops, jitter, loudness ranges, hue shift).
+- **Gold**: a separate metallic layer drawn on top of the paint, so it stays brilliant instead of mixing into the blues. High notes deposit gold (more when loud), about 1 in 7 pours carries a gold accent at any pitch, and some treble specks are gold flecks. Its highlights shine more in loud passages.
+- **Vibrance**: a mild chroma boost at display makes the blues and golds pop.
+- **Settings**: everything is in the `COLOUR` config at the top of `Scene1Fluid.js` (ramp stops, jitter, loudness ranges, hue shift, vibrance, and the `GOLD` settings).
 
 The dye stores real colour, premultiplied by paint amount, in **Oklab**, a perceptual colour space, so mixes stay colourful like paint instead of averaging to grey as linear RGB does. `display.frag` then:
 - keeps borders between pours crisp with an unsharp mask
