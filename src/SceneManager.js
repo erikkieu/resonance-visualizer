@@ -30,6 +30,9 @@ const PIXEL_BUDGET = 3.4e6;
  * mixes and outputs to the canvas. The outgoing scene is disposed as soon as
  * its fade completes, so at most two scenes hold GPU memory at once.
  */
+// composite tone curve: 0 none, 1 ACES, 2 ACES in the darks rolling into a hue-keeping shoulder (toneMapped: 'soft')
+const toneMode = (scene) => (scene.toneMapped === 'soft' ? 2 : scene.toneMapped ? 1 : 0);
+
 export class SceneManager {
   constructor(renderer) {
     this.renderer = renderer;
@@ -209,10 +212,10 @@ export class SceneManager {
     if (prev) prev.scene.render(prev.target);
 
     u.tCur.value = cur.target.texture;
-    u.uCurGrade.value.set(cur.scene.exposure, cur.scene.toneMapped ? 1 : 0);
+    u.uCurGrade.value.set(cur.scene.exposure, toneMode(cur.scene));
     u.uHasPrev.value = prev ? 1 : 0;
     u.tPrev.value = prev ? prev.target.texture : cur.target.texture;
-    if (prev) u.uPrevGrade.value.set(prev.scene.exposure, prev.scene.toneMapped ? 1 : 0);
+    if (prev) u.uPrevGrade.value.set(prev.scene.exposure, toneMode(prev.scene));
     u.uDither.value.set(cur.scene.dither ?? 1, cur.scene.ditherAnimated === false ? 0 : 1);
     u.uMix.value = this.fade;
     u.uTime.value = this.time;

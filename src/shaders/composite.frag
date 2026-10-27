@@ -29,9 +29,22 @@ vec3 acesFilmic(vec3 color) {
   return clamp(color, 0.0, 1.0);
 }
 
+// 'soft': ACES below ~0.3 (unchanged darks); above, the colour is scaled by ACES's grey curve at its
+// brightest channel, so bright saturated light keeps its hue and colour instead of washing out to
+// white; only the very cores (several times over the shoulder) whiten.
+vec3 softTone(vec3 c) {
+  vec3 a = acesFilmic(c);
+  float m = max(max(c.r, c.g), c.b);
+  float tm = RRTAndODTFit(vec3(m * 0.98)).x; // (≈ ACES on a grey of that level)
+  vec3 h = c * (tm / max(m, 1e-5));
+  h = mix(h, vec3(tm), smoothstep(2.5, 9.0, m));
+  return clamp(mix(a, h, smoothstep(0.3, 1.0, m)), 0.0, 1.0);
+}
+
 vec3 grade(vec3 c, vec2 g) {
   c *= g.x;
-  if (g.y > 0.5) c = acesFilmic(c);
+  if (g.y > 1.5) c = softTone(c);
+  else if (g.y > 0.5) c = acesFilmic(c);
   return clamp(c, 0.0, 1.0);
 }
 

@@ -15,17 +15,24 @@
 // hint of the Milky Way; then a pale blue to rose glow in the east (right)
 // as dawn comes, the stars thinning from the horizon upward. It also
 // lights the snow, darkens the water and sets the aurora's strength.
-// The look (PROFILE.LOOK, after public/textures/aurora-reference.jpg): the
-// aurora is sampled through a fan warp (rays converge upward, as seen from
-// below) with a slow sway, blurred along the rays into long-exposure streaks;
-// the sky gets a teal wash of the aurora's light and a low mist; dark cloud
-// banks on both sides (fbm) catch a warm peach rim from a low light below the
-// horizon; three mountain layers fade into the haze; the glassy water carries
-// fine ripples and rings around a Viking longship (a 2D silhouette: hull,
-// dragon prows, mast, sail, rigging, shields, warm lanterns), whose
-// reflection and lantern streaks are drawn into the water. A filmic grade
-// (lifted teal blacks, desaturation that spares the warm accents, vignette)
-// ends the pass; ACES and the dither follow in the composite.
+// The look (PROFILE.LOOK, reference restyle 2: a long exposure of a big green
+// aurora overhead): the aurora layer is already in perspective (aurora.frag);
+// here it is blurred along its rays (toward the vanishing point) into soft
+// long-exposure streaks. The sky is a teal-grey gradient under a soft green
+// airglow and the aurora's own wash, darker at the far left and the upper
+// corners, with a faint violet in the dark gaps between the curtains; a few
+// hundred small sharp stars dim behind the bright aurora; thin, dark, cool
+// cloud wisps barely silhouette it. A low band of blue-green mountains, three
+// layers with a little haze, carries snow streaks whose ridges catch the
+// aurora's green. The water is a dark, calm, glassy mirror of the whole sky
+// (R toggles it): the aurora in its own colours, the stars and the
+// mountains, Fresnel-strong near the horizon and fading toward the bottom,
+// softly streaked vertically and wobbling sideways more with distance; small
+// slow ripples, soft rings from note onsets (uRing), a glow along the
+// shoreline and a coloured glow where the reflected aurora is brightest.
+// The longship (B) is hidden in this look.
+// A filmic grade (lifted teal blacks, gentle saturation, subtle vignette)
+// ends the pass; the bloom, ACES and the dither follow.
 // ---------------------------------------------------------------------------
 
 uniform sampler2D tAurora;
@@ -44,17 +51,20 @@ uniform vec4 uGlowHeight;    // x = dusk glow height, y = dawn glow height (view
 uniform vec4 uStars;         // x = brightness, y = share shown (brightest first), z = dawn reach
 uniform float uMilkyWay;
 uniform vec4 uNightAurora;   // x = aurora gain, y = saturation
-uniform vec3 uWater;         // base water colour at night 0
 uniform float uSnowGlow;
 uniform vec2 uAuroraBlur;    // x = radius px, y = 1: 3x3 tent (clean), 0: the previous 5 taps
 uniform float uClock;        // real seconds (steady drift, independent of the music clock)
-uniform vec4 uFan;           // x = fan, y = fan centre x, z = sway (screen widths at the top), w = streak blur px
+uniform vec4 uStreak;        // xy = the rays' vanishing point (screen x, height), z = blur along the rays (px)
 uniform vec4 uSkyLook;       // x = aurora wash, y = haze, z = haze height, w = shore glow
+uniform vec4 uSkyLook2;      // x = dark corners, y = violet in the gaps, z = soft cap of the aurora's average light (0 = none)
+uniform vec3 uAirglow;
+uniform vec3 uGapCol;
 uniform vec3 uHazeCol;
 uniform vec4 uStarLook;      // x = density, y = size, z = dimming behind the aurora
 uniform vec4 uCloud;         // x = on, y = scale, z = cover, w = softness
 uniform vec4 uCloud2;        // xy = inner edges (left, right), zw = band (bottom, top)
-uniform vec4 uCloud3;        // x = aurora tint, y = rim strength (incl. bass, dawn), z = rim width
+uniform vec4 uCloud3;        // x = aurora tint, y = rim strength (incl. bass, dawn), z = rim width, w = opacity
+uniform float uCloudStretch; // sideways stretch of the wisps
 uniform vec4 uCloudLight;    // xy = low light position, zw = drift offsets of the left / right banks
 uniform vec3 uCloudBody;
 uniform vec3 uCloudRim0;
@@ -62,8 +72,16 @@ uniform vec3 uCloudRim1;
 uniform vec3 uRock;
 uniform vec3 uSnow;
 uniform vec4 uMount;         // xyz = haze over the far / middle / near layers, w = sky light on the snow
+uniform float uMountRim;     // the aurora's green rim light on the ridges
+uniform float uMountLit;     // the rock and snow's own light (dimmer when the aurora is faint)
 uniform vec4 uWaterLook;     // x = ripple amplitude, y = fineness, z = ring amplitude, w = rocks on
-uniform vec3 uWaterDark;
+uniform vec3 uWaterTop;      // at the horizon ...
+uniform vec3 uWaterBottom;   // ... and at the bottom
+uniform vec4 uReflect;       // x = reflection strength, y = smear at the horizon, z = at the bottom (screen heights), w = ripple speed
+uniform float uReach;        // the water mirrors this much more of the sky than a plain mirror (it shows the aurora)
+uniform vec4 uReflect2;      // x = reflection at the bottom (uReflect.x: at the horizon), y = Fresnel falloff, z = sideways wobble, w = reflected stars
+uniform vec4 uReflect3;      // x = horizon glow, y = shoreline glow, z = ring width (water units)
+uniform vec4 uRing[4];       // onset rings: xy = centre on the water plane, z = radius, w = amplitude (0 = none)
 uniform vec4 uShip;          // x = screen x, y = waterline, z = half-length (screen widths), w = on
 uniform vec4 uShip2;         // x = bob, y = roll, z = sail billow, w = lantern strength
 uniform vec4 uShip3;         // x = sail light, y = flicker
@@ -137,22 +155,18 @@ vec3 paintedAurora(vec2 uv, out float stroke) {
     // painting off: smooth, continuous light (a soft blur hides the volume march's jitter grain)
     vec2 o = uAuroraBlur.x / uResolution;
     if (uAuroraBlur.y > 0.5) {
-      // the rays fan in toward the top (seen from below) and sway slowly; outside the
-      // aurora layer's width the top corners stay dark
-      float up = max(uv.y - HORIZON, 0.0);
-      float k = max(1.0 - uFan.x * up, 0.2);
-      float x0 = uFan.y + (uv.x - uFan.y) / k + uFan.z * up / (1.0 - HORIZON);
-      float edge = smoothstep(-0.05, 0.3, x0) * smoothstep(1.05, 0.7, x0);
-      uv = vec2(x0, uv.y);
-      // long-exposure streaks: the blur runs along the rays (y), with the soft blur across
-      o = vec2(uAuroraBlur.x, uFan.w) / uResolution;
-      // 3x3 tent: a stable kernel, no shimmer
+      // long-exposure streaks: the blur runs along the rays (toward the vanishing point),
+      // with the soft blur across them; 3x3 tent, a stable kernel, no shimmer
+      vec2 along = vec2((uStreak.x - uv.x) * uAspect, uStreak.y - uv.y);
+      along = normalize(along + vec2(0.0, 1e-4));
+      vec2 ao = vec2(along.x / uAspect, along.y) * uStreak.z / uResolution.y;
+      vec2 xo = vec2(along.y / uAspect, -along.x) * uAuroraBlur.x / uResolution.y;
       vec3 c = 0.25 * texture2D(tAurora, uv).rgb;
-      c += 0.125 * (texture2D(tAurora, uv + vec2(o.x, 0.0)).rgb + texture2D(tAurora, uv - vec2(o.x, 0.0)).rgb
-                  + texture2D(tAurora, uv + vec2(0.0, o.y)).rgb + texture2D(tAurora, uv - vec2(0.0, o.y)).rgb);
-      c += 0.0625 * (texture2D(tAurora, uv + o).rgb + texture2D(tAurora, uv - o).rgb
-                   + texture2D(tAurora, uv + vec2(o.x, -o.y)).rgb + texture2D(tAurora, uv + vec2(-o.x, o.y)).rgb);
-      return c * edge;
+      c += 0.125 * (texture2D(tAurora, uv + xo).rgb + texture2D(tAurora, uv - xo).rgb
+                  + texture2D(tAurora, uv + ao).rgb + texture2D(tAurora, uv - ao).rgb);
+      c += 0.0625 * (texture2D(tAurora, uv + xo + ao).rgb + texture2D(tAurora, uv - xo - ao).rgb
+                   + texture2D(tAurora, uv + xo - ao).rgb + texture2D(tAurora, uv - xo + ao).rgb);
+      return c;
     }
     return 0.4 * texture2D(tAurora, uv).rgb
          + 0.15 * (texture2D(tAurora, uv + vec2(o.x, o.y)).rgb + texture2D(tAurora, uv + vec2(-o.x, o.y)).rgb
@@ -183,7 +197,7 @@ float cloudDensity(vec2 p) {
   float band = smoothstep(uCloud2.z - 0.02, uCloud2.z + 0.08, p.y) * (1.0 - smoothstep(uCloud2.w - 0.18, uCloud2.w, p.y));
   vec2 q = p * uCloud.y + vec2(p.x < 0.0 ? uCloudLight.z : uCloudLight.w, 0.0);
   // billowing: rounder low frequencies, a little stretched sideways
-  float n = 0.5 + 0.5 * fbm(q * vec2(0.8, 1.15), 4);
+  float n = 0.5 + 0.5 * fbm(q * vec2(1.0 / uCloudStretch, 1.15), 4);
   return n * (0.35 + 0.65 * side) * band + 0.25 * side * band;
 }
 
@@ -294,61 +308,94 @@ vec3 horizonGlow(float ry, float x) {
   return col;
 }
 
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+// The sky's light without stars and clouds (also what the water mirrors): the teal-grey
+// gradient of the night, darker at the far left and the upper corners, the green airglow,
+// the dusk / dawn glow, faint violet in the gaps, the aurora and its wash. Returns the
+// aurora alone in `aurora`.
+vec3 skyLight(vec2 uv, vec3 amb, out vec3 aurora) {
+  vec3 rd = viewRay(uv);
+  float ry = max(rd.y, 0.0);
+  float h = clamp(rd.y / 0.6, 0.0, 1.0);
+  vec3 horizonCol = mix(uSkyDusk[0], uSkyNight[0], uNight);
+  vec3 zenithCol = mix(uSkyDusk[1], uSkyNight[1], uNight);
+  vec3 col = mix(horizonCol, zenithCol, smoothstep(0.0, 0.9, h));
+  float corner = smoothstep(0.32, 0.0, uv.x) * (0.55 + 0.45 * smoothstep(0.3, 0.8, uv.y))
+               + smoothstep(0.72, 1.0, uv.y) * smoothstep(0.35, 1.0, abs(uv.x - 0.58) * 2.2);
+  corner = min(corner, 1.0);
+  col *= 1.0 - uSkyLook2.x * corner;
+  col += uAirglow * (1.0 - 0.6 * corner);
+  col += horizonGlow(ry, uv.x);
+  float stroke;
+  aurora = paintedAurora(uv, stroke);
+  // pale and faint at dusk, vivid at night, giving way to the dawn
+  aurora = mix(vec3(dot(aurora, LUMA)), aurora, uNightAurora.y) * uNightAurora.x;
+  // a faint violet in the dark gaps between the curtains
+  float gap = smoothstep(0.01, 0.06, dot(amb, LUMA)) * (1.0 - smoothstep(0.005, 0.08, dot(aurora, LUMA)));
+  col = mix(col, uGapCol, uSkyLook2.y * gap * (1.0 - corner));
+  col += aurora;
+  // the aurora washes the sky green around it (most in the middle of the sky)
+  col += amb * uSkyLook.x * (0.45 + 0.55 * exp(-pow((h - 0.45) / 0.45, 2.0))) * (1.0 - 0.5 * corner);
+  return col;
+}
+
+// Mountain colour for a terrain texel: blue-green rock, snow streaks lit by the aurora, the
+// ridges rim-lit green; farther layers hazier.
+vec3 mountain(vec4 terrain, vec2 uv, vec3 amb, vec3 haze) {
+  float layer = terrain.b > 0.83 ? 2.0 : terrain.b > 0.5 ? 1.0 : 0.0;
+  vec3 rock = uRock * uMountLit * mix(1.0, 0.7, layer / 2.0) + amb * 0.03;
+  vec3 snowCol = uSnow * uMountLit + amb * uMount.w + horizonGlow(0.02, uv.x) * uSnowGlow;
+  vec3 m = mix(rock, snowCol, terrain.g);
+  m += amb * uMountRim * terrain.a * (0.35 + 0.65 * terrain.g);
+  float hz = layer > 1.5 ? uMount.z : layer > 0.5 ? uMount.y : uMount.x;
+  return mix(m, haze, hz);
+}
+
+vec3 hazeColor(vec3 amb) {
+  return uHazeCol * (0.6 + 0.4 * uNight) + amb * 0.25;
+}
+
 // Everything above the water line, for screen position uv.
 vec3 above(vec2 uv, vec3 amb, float starGain) {
   vec3 rd = viewRay(uv);
   float y = uv.y - HORIZON;
   vec4 terrain = texture2D(tTerrain, uv);
   float ry = max(rd.y, 0.0);
-
-  // sky gradient, horizon -> zenith, from the deep blue of dusk to the black-blue of deepest night
-  float h = clamp(rd.y / 0.55, 0.0, 1.0);
-  vec3 horizonCol = mix(uSkyDusk[0], uSkyNight[0], uNight);
-  vec3 zenithCol = mix(uSkyDusk[1], uSkyNight[1], uNight);
-  vec3 col = mix(horizonCol, zenithCol, smoothstep(0.0, 0.9, h));
-  col += vec3(0.0, 0.025, 0.02) * exp(-ry * 14.0) * (0.4 + 0.6 * uNight); // airglow
-  vec3 glow = horizonGlow(ry, uv.x);
-  col += glow;
-  col += vec3(0.02, 0.022, 0.03) * terrain.r * uMilkyWay;                 // Milky Way
-  // stars: fewer and dimmer at dusk; at dawn they thin from the horizon upward
+  float h = clamp(rd.y / 0.6, 0.0, 1.0);
+  vec3 aurora;
+  vec3 col = skyLight(uv, amb, aurora);
+  col += vec3(0.02, 0.022, 0.03) * terrain.r * uMilkyWay; // Milky Way
+  // stars: fewer and dimmer at dusk; at dawn they thin from the horizon upward; dimmed behind the aurora
   float cut = uDawn * uStars.z;
   float thin = mix(1.0, smoothstep(cut - 0.25, cut + 0.05, h), smoothstep(0.0, 0.1, uDawn)) * (1.0 - 0.5 * uDawn);
-  col += starField(uv, uStars.y) * starGain * uStars.x * thin * (1.0 + terrain.r * 1.5);
-  float stroke;
-  vec3 aurora = paintedAurora(uv, stroke);
-  // pale and faint at dusk, vivid at night, giving way to the dawn
-  aurora = mix(vec3(dot(aurora, vec3(0.2126, 0.7152, 0.0722))), aurora, uNightAurora.y) * uNightAurora.x;
-  col *= 1.0 + uPaint2.y * (stroke - 0.5); // a faint trace of the strokes in the bare sky
-  // the stars dim behind the aurora
-  col /= 1.0 + uStarLook.z * dot(aurora, vec3(0.2126, 0.7152, 0.0722));
-  col += aurora;
-  // the aurora washes the sky teal-green around it (most in the middle of the sky)
-  col += amb * uSkyLook.x * (0.35 + 0.65 * exp(-pow((h - 0.35) / 0.4, 2.0)));
-  // low mist over the horizon
-  vec3 haze = uHazeCol * (0.55 + 0.45 * (1.0 - uNight)) + amb * 0.2 + glow * 0.5;
+  vec3 stars = starField(uv, uStars.y) * starGain * uStars.x * thin * (1.0 + terrain.r * 1.5);
+  col += stars / (1.0 + uStarLook.z * dot(aurora, LUMA));
+  // low mist over the mountains
+  vec3 haze = hazeColor(amb);
   col = mix(col, haze, uSkyLook.y * exp(-ry / uSkyLook.z));
 
-  // cloud banks: dark bodies lit green by the aurora, warm rims toward the low light
+  // thin, dark, cool cloud wisps, barely silhouetting the aurora
   vec2 cp = vec2((uv.x - 0.5) * uAspect, y);
   vec2 cl = clouds(cp);
-  vec3 body = uCloudBody * (0.6 + 0.4 * (1.0 - uNight)) + amb * uCloud3.x + aurora * 0.06;
-  col = mix(col, body, cl.x * 0.93);
+  vec3 body = uCloudBody + amb * uCloud3.x;
+  col = mix(col, body, cl.x * uCloud3.w);
   col += mix(uCloudRim0, uCloudRim1, smoothstep(0.2, 1.0, cl.y)) * cl.y * uCloud3.y;
 
-  // mountains: three layers, farther = lighter, bluer and hazier; the snow takes the sky's light
-  if (terrain.b > 0.16) {
-    float layer = terrain.b > 0.83 ? 2.0 : terrain.b > 0.5 ? 1.0 : 0.0;
-    float near = layer / 2.0;
-    vec3 skyLight = amb * 0.6 + uHazeCol * 0.4 + horizonGlow(0.02, uv.x) * uSnowGlow;
-    vec3 rock = uRock * mix(0.1, 0.05, near) + amb * 0.04;
-    vec3 snowCol = uSnow * mix(0.16, 0.2, near) + skyLight * uMount.w;
-    vec3 m = mix(rock, snowCol, terrain.g);
-    float hz = layer > 1.5 ? uMount.z : layer > 0.5 ? uMount.y : uMount.x;
-    col = mix(m, haze, hz);
-  }
+  if (terrain.b > 0.16) col = mountain(terrain, uv, amb, haze);
   // a faint glow where the far shore meets the water
   col += amb * uSkyLook.w * exp(-y * 90.0) * step(0.0, y);
   return col;
+}
+
+// What the water mirrors at (mirrored) screen position uv: the mountains or the sky's light.
+vec3 mirrored(vec2 uv, vec3 amb) {
+  vec4 terrain = texture2D(tTerrain, uv);
+  vec3 haze = hazeColor(amb);
+  if (terrain.b > 0.16) return mountain(terrain, uv, amb, haze);
+  vec3 aurora;
+  vec3 col = skyLight(uv, amb, aurora);
+  return mix(col, haze, uSkyLook.y * exp(-max(viewRay(uv).y, 0.0) / uSkyLook.z));
 }
 
 // Rounded boulders along the foreground shore. Returns the rock top height.
@@ -369,6 +416,7 @@ float boulders(float x) {
 void main() {
   vec2 uv = vUv;
   vec3 amb = texture2D(tAmbient, vec2(0.5)).rgb * uNightAurora.x;
+  if (uSkyLook2.z > 0.0) amb /= 1.0 + dot(amb, LUMA) / uSkyLook2.z; // (vivid: bright ribbons, the scene around them stays dark)
   vec3 col;
 
   if (uv.y >= HORIZON) {
@@ -380,8 +428,8 @@ void main() {
     vec2 w = rd.xz * t;
     float depth = (HORIZON - uv.y) / HORIZON; // 0 at horizon, 1 at the bottom
 
-    // glassy: fine, low, mostly horizontal ripples (long across, short in depth)
-    float tt = uTime * 0.4;
+    // calm: faint, slow, mostly horizontal ripples (long across, short in depth)
+    float tt = uTime * uReflect.w;
     vec2 wp = vec2(w.x * 0.3, w.y * 1.4 * uWaterLook.y);
     float n0 = snoise(vec3(wp, tt));
     float n1 = snoise(vec3(wp * vec2(2.3, 2.9) + 7.0, tt * 1.6));
@@ -393,16 +441,38 @@ void main() {
     float dr = length(dw);
     slope.y += uWaterLook.z * uShip.w * sin(dr * 9.0 - uClock * 1.6) * exp(-dr * 0.35) * smoothstep(0.0, 0.6, dr);
 
-    // mirrored sample, displaced by the ripples (more near the viewer)
-    vec2 ruv = vec2(uv.x, 2.0 * HORIZON - uv.y);
-    ruv += slope * vec2(0.003, 0.01) * (0.3 + depth * 1.5);
-    ruv.y = max(ruv.y, HORIZON + 0.0005);
-    vec3 refl = above(ruv, amb, 0.35);
+    // soft rings from note onsets, each a smooth swell running outward and fading
+    for (int i = 0; i < 4; i++) {
+      vec4 g = uRing[i];
+      if (g.w <= 0.0) continue;
+      float rd2 = length((w - g.xy) * vec2(1.0, 2.2)) - g.z;
+      slope.y += g.w * sin(rd2 * 6.0) * exp(-rd2 * rd2 / (uReflect3.z * uReflect3.z));
+    }
 
-    // fresnel-ish: grazing angles reflect more
-    float fres = mix(0.8, 0.3, pow(depth, 0.7));
-    vec3 water = mix(uWater, uWaterDark, uNight);
+    // the mirror: displaced by the ripples, wobbling sideways more with distance from the
+    // horizon, softly streaked vertically (more toward the bottom), reaching uReach times as
+    // far up the sky as a plain mirror
+    vec2 ruv = vec2(uv.x, HORIZON + (HORIZON - uv.y) * uReach);
+    ruv += slope * vec2(0.003, 0.01) * (0.3 + depth * 1.5);
+    ruv.x += uReflect2.z * depth * (slope.y + 0.5 * slope.x);
+    float smear = mix(uReflect.y, uReflect.z, depth);
+    vec3 refl = vec3(0.0);
+    for (int i = 0; i < 6; i++) {
+      float o = (float(i) - 2.5) / 2.5 * smear;
+      refl += mirrored(vec2(ruv.x, max(ruv.y + o, HORIZON + 0.0005)), amb);
+    }
+    refl /= 6.0;
+    // the stars, small and a little dimmer (only where the sky shows, not the mountains)
+    vec2 sv = vec2(ruv.x, max(ruv.y, HORIZON + 0.0005));
+    if (texture2D(tTerrain, sv).b < 0.16) refl += starField(sv, uStars.y) * uStars.x * uReflect2.w;
+    // Fresnel: strongest at the far water near the horizon, weaker in the foreground
+    float fres = mix(uReflect.x, uReflect2.x, pow(depth, 1.0 / uReflect2.y));
+    vec3 water = mix(uWaterTop, uWaterBottom, depth);
     col = water + refl * fres;
+    // a coloured glow where the reflected aurora is brightest, near the horizon, and the
+    // aurora's glow along the shoreline in the mountains' reflection
+    col += refl * fres * uReflect3.x * exp(-depth * 7.0);
+    col += amb * uReflect3.y * fres * exp(-depth * 30.0);
 
     // the ship's reflection: mirrored about its waterline, broken by the ripples, darker;
     // its lanterns stretch into vertical warm streaks
@@ -417,7 +487,7 @@ void main() {
       col += shipLights(qs, vec2(0.9, 1.0)) * 0.55 * broken * uShip.w;
     }
     // thin bright ripple glints catch the aurora
-    col += amb * 0.25 * smoothstep(0.55, 1.0, n0) * (1.0 - depth);
+    col += amb * 0.06 * smoothstep(0.6, 1.0, n0) * (1.0 - depth) * uReflect.x;
 
     // --- foreground shoreline rocks with a green aurora rim light (off in the restyle)
     float x = (uv.x - 0.5) * uAspect;

@@ -55,12 +55,42 @@
  *
  *   npm run verify -- standchen --look [--out dir]
  *
- * checks Scene 2's restyle toward public/textures/aurora-reference.jpg: at
- * LOOK_TIMES, from a screenshot, the dominant hue (OKLCH, chroma-weighted)
- * and mean HSV saturation of the aurora (the brightest 30 % of the sky
- * pixels), the share of warm pixels (peach / salmon / orange, OKLCH hue
- * 20-80°) in the sky (the cloud rims, aim 2-8 %), mean luminance and fps;
- * screenshots at LOOK_SHOTS. Run it before a change for a baseline.
+ * checks Scene 2's look across the piece: at LOOK_TIMES, from a screenshot,
+ * the dominant hue (OKLCH, chroma-weighted) and mean HSV saturation of the
+ * aurora (the brightest 30 % of the sky pixels), the share of warm pixels
+ * (OKLCH hue 20-80°) in the sky, mean luminance and fps; screenshots at
+ * LOOK_SHOTS. For reference restyle 2: a green aurora (OKLCH hue 125-170°)
+ * and no warm clouds (warm share under 1 % outside dusk and dawn). Run it
+ * before a change for a baseline.
+ *
+ *   npm run verify -- standchen --match [--at 260] [--out dir]
+ *
+ * compares Scene 2 with its reference photo (reference restyle 2): renders a
+ * loud-ish moment (MATCH_TIME, 4:20), and prints for each region of
+ * MATCH_REGIONS (fractions of the frame from the top) its mean colour (hex)
+ * and mean luma (Rec. 709 weights on the sRGB values), plus the aurora's
+ * bright-core colour (the brightest 2 % of the sky) and the number of visible
+ * stars (sharp local maxima in the sky), each next to the reference and the
+ * difference. The reference values come from public/textures/aurora-reference-2.jpg
+ * measured the same way when the file exists (and a side-by-side image is
+ * saved), else from PROFILE.LOOK.REFERENCE. A region passes within 15 % luma
+ * and ΔE (OKLab) 0.05. (The vivid version deliberately leaves these targets;
+ * press V in the scene, or set LOOK.PALETTE.VIVID false, for the muted look.)
+ *
+ *   npm run verify -- standchen --vivid [--out dir]
+ *
+ * checks Scene 2's vivid version: at VIVID_TIMES (quiet, building, climax,
+ * fade) it prints, for the aurora pixels of the sky (brighter than 1.6x the
+ * sky's median, or OKLCH chroma over 0.09), their mean HSV saturation, the peak (p99.5 luma) and the
+ * share of clipped pixels, the share of green / cyan / blue / purple hues,
+ * the active ribbons, and the reflection ratio: linear luminance of the water
+ * against the sky it mirrors (pixel by pixel, where that sky is brighter than
+ * its median), in the upper water (0.03-0.09 below the water line: right
+ * under it the water mirrors the mountains) and near the bottom. At the climax it also measures the muted
+ * palette (V) for comparison. Checks: climax saturation clearly above the
+ * muted look, green, blue and purple each >= 10 % of the aurora, >= 4
+ * ribbons, reflection 0.5-0.7 near the horizon, the quiet moment calmer but
+ * still colourful. Screenshots at VIVID_SHOTS.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -90,10 +120,25 @@ const AURORA_TRACE = [64, 84];
 const LOOK = args.includes('--look');
 const LOOK_TIMES = [10, 80, 160, 260, 290, 350]; // quiet, 1:20, mid, building, climax, fade
 const LOOK_SHOTS = [10, 160, 290, 350];
+const MATCH = args.includes('--match');
+const MATCH_TIME = Number(flag('--at', 260)); // s: 4:20, building toward the climax
+const MATCH_REGIONS = {
+  TOP_SKY: [0, 1, 0, 0.15], // [x0, x1, y0, y1], fractions of the frame (y from the top)
+  AURORA_MID: [0, 1, 0.2, 0.55],
+  DARK_LEFT: [0, 0.15, 0.35, 0.6],
+  HORIZON_GLOW: [0, 1, 0.55, 0.65],
+  MOUNTAINS: [0, 1, 0.68, 0.82],
+  FAR_WATER: [0, 1, 0.84, 0.92],
+  NEAR_WATER: [0, 1, 0.92, 1],
+};
+const VIVID = args.includes('--vivid');
+const VIVID_TIMES = [10, 80, 160, 260, 290, 350]; // quiet, 1:20, 2:40, building, climax, fade
+const VIVID_SHOTS = [10, 260, 290];
+const WATER_LINE = 0.18; // HORIZON in src/shaders/aurora/common.glsl (screen height of the water line)
 const SMOOTH = args.includes('--smooth');
 const SMOOTH_WINDOWS = [[10, 'quiet'], [255, 'building'], [287, 'climax']].filter(([t]) => !flag('--windows') || flag('--windows').split(',').map(Number).includes(t)); // s, 5 s each (--windows 287 = only those)
 const SMOOTH_SHOTS = [160, 290, 350]; // s: 20 s of the 1:04 swell's melody: packets spawned against notes heard
-const only = args.filter((a, i) => !a.startsWith('--') && !['--out', '--seq', '--windows'].includes(args[i - 1]));
+const only = args.filter((a, i) => !a.startsWith('--') && !['--out', '--seq', '--windows', '--at'].includes(args[i - 1]));
 const SEQ = flag('--seq', '')
   .split(',')
   .filter(Boolean)
@@ -208,6 +253,26 @@ async function verifyPiece(browser, url, piece) {
     const result = await lookPass(page, dir, seekAndPlay);
     const fps = await page.evaluate(() => window.__resonance.fps);
     fs.writeFileSync(path.join(dir, 'look-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
+    console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
+    console.log(`  -> ${dir}`);
+    await page.close();
+    return;
+  }
+
+  if (VIVID) {
+    const result = await vividPass(page, dir, seekAndPlay);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    fs.writeFileSync(path.join(dir, 'vivid-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
+    console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
+    console.log(`  -> ${dir}`);
+    await page.close();
+    return;
+  }
+
+  if (MATCH) {
+    const result = await matchPass(page, dir, seekAndPlay);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    fs.writeFileSync(path.join(dir, 'match-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
     console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
     console.log(`  -> ${dir}`);
     await page.close();
@@ -592,11 +657,277 @@ async function lookPass(page, dir, seekAndPlay) {
     rows.push({ t, ...f, fps, file });
     console.log(`  ${fmt(t).padStart(7)}  ${String(f.hue).padStart(4)}°      ${f.sat.toFixed(3)}  ${f.chroma.toFixed(3)}   ${(f.warm * 100).toFixed(1).padStart(5)} %   ${f.lum.toFixed(4)}  ${fps.toFixed(0)}${file ? '  [shot]' : ''}`);
   }
-  const mint = rows.filter((r) => r.hue >= 150 && r.hue <= 205).length;
+  const green = rows.filter((r) => r.hue >= 125 && r.hue <= 170).length;
   const meanSat = rows.reduce((s, r) => s + r.sat, 0) / rows.length;
-  const warmOk = rows.filter((r) => r.warm >= 0.02 && r.warm <= 0.08).length;
-  console.log(`  aurora hue mint-teal (150-205°) in ${mint}/${rows.length} · mean saturation ${meanSat.toFixed(3)} · warm cloud rims 2-8 % in ${warmOk}/${rows.length}`);
-  return { rows, meanSat, mint, warmOk };
+  const night = rows.filter((r) => r.t >= 60 && r.t <= 320);
+  const warmOk = night.filter((r) => r.warm < 0.01).length;
+  console.log(`  aurora hue green (125-170°) in ${green}/${rows.length} · mean saturation ${meanSat.toFixed(3)} · no warm clouds (< 1 %, 1:00-5:20) in ${warmOk}/${night.length}`);
+  return { rows, meanSat, green, warmOk };
+}
+
+/**
+ * Region means, bright core and star count of an image (in the page: `src` is a
+ * URL or data URL), measured at 1280 x 720. With `pair`, also returns a
+ * side-by-side PNG (data URL) of `pair` (left) and this image (right).
+ */
+function regionStats(page, src, regions, pair) {
+  return page.evaluate(
+    async ({ src, regions, pair }) => {
+      const load = async (u) => {
+        const img = new Image();
+        img.src = u;
+        await img.decode();
+        return img;
+      };
+      const img = await load(src);
+      const W = 1280;
+      const H = 720;
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0, W, H);
+      const px = g.getImageData(0, 0, W, H).data;
+      const luma = (i) => (0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]) / 255;
+      const hex = (r, gg, b) => '#' + [r, gg, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+      const out = {};
+      for (const [name, [x0, x1, y0, y1]] of Object.entries(regions)) {
+        let r = 0, gg = 0, b = 0, n = 0;
+        for (let y = Math.floor(y0 * H); y < Math.floor(y1 * H); y++)
+          for (let x = Math.floor(x0 * W); x < Math.floor(x1 * W); x++) {
+            const i = 4 * (y * W + x);
+            r += px[i];
+            gg += px[i + 1];
+            b += px[i + 2];
+            n++;
+          }
+        out[name] = { hex: hex(r / n, gg / n, b / n), luma: (0.2126 * r + 0.7152 * gg + 0.0722 * b) / n / 255 };
+      }
+      // the bright cores: the brightest 2 % of the sky (top 65 %)
+      const SKY = Math.floor(H * 0.65);
+      const sky = [];
+      for (let i = 0; i < W * SKY; i++) sky.push(luma(4 * i));
+      const cut = [...sky].sort((a, b) => a - b)[Math.floor(sky.length * 0.98)];
+      let r = 0, gg = 0, b = 0, n = 0;
+      for (let i = 0; i < W * SKY; i++)
+        if (sky[i] >= cut) {
+          r += px[4 * i];
+          gg += px[4 * i + 1];
+          b += px[4 * i + 2];
+          n++;
+        }
+      out.CORE = { hex: hex(r / n, gg / n, b / n), luma: (0.2126 * r + 0.7152 * gg + 0.0722 * b) / n / 255 };
+      // stars: a sharp local maximum (5x5) clearly above the ring 3 px around it
+      let stars = 0;
+      for (let y = 3; y < SKY - 3; y++)
+        for (let x = 3; x < W - 3; x++) {
+          const v = sky[y * W + x];
+          let ring = 0;
+          for (const [dx, dy] of [[3, 0], [-3, 0], [0, 3], [0, -3], [2, 2], [-2, 2], [2, -2], [-2, -2]]) ring += sky[(y + dy) * W + x + dx];
+          if (v - ring / 8 < 0.05) continue;
+          let max = true;
+          for (let dy = -2; dy <= 2 && max; dy++) for (let dx = -2; dx <= 2; dx++) if ((dx || dy) && sky[(y + dy) * W + x + dx] > v) { max = false; break; }
+          if (max) stars++;
+        }
+      out.STARS = stars;
+      if (pair) {
+        const sb = document.createElement('canvas');
+        sb.width = 2 * W;
+        sb.height = H;
+        const sg = sb.getContext('2d');
+        sg.drawImage(await load(pair), 0, 0, W, H);
+        sg.drawImage(img, W, 0, W, H);
+        out.pair = sb.toDataURL('image/png');
+      }
+      return out;
+    },
+    { src, regions, pair },
+  );
+}
+
+/** OKLab of an sRGB hex. */
+function oklab(hex) {
+  const lin = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+  const [r, g, b] = [1, 3, 5].map((i) => lin(parseInt(hex.slice(i, i + 2), 16) / 255));
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+}
+
+/** HSV hue (°) and saturation of an sRGB hex. */
+function hsv(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const mx = Math.max(r, g, b);
+  const d = mx - Math.min(r, g, b);
+  const h = d === 0 ? 0 : mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return { h: Math.round(((h * 60) + 360) % 360), s: mx ? d / mx : 0 };
+}
+
+/** Aurora colour stats and the reflection ratio of a screenshot (see --vivid). */
+async function vividStats(page, file, reach) {
+  const png = await page.screenshot({ path: file ?? undefined });
+  return page.evaluate(
+    async ({ b64, reach, line }) => {
+      const img = new Image();
+      img.src = `data:image/png;base64,${b64}`;
+      await img.decode();
+      const W = 640;
+      const H = 360;
+      const c = document.createElement('canvas');
+      c.width = W;
+      c.height = H;
+      const g = c.getContext('2d');
+      g.drawImage(img, 0, 0, W, H);
+      const px = g.getImageData(0, 0, W, H).data;
+      const lin = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+      const Yat = (x, y) => {
+        const i = 4 * (y * W + x);
+        return 0.2126 * lin(px[i] / 255) + 0.7152 * lin(px[i + 1] / 255) + 0.0722 * lin(px[i + 2] / 255);
+      };
+      // the sky above the mountains
+      const SKY = Math.floor(H * 0.64);
+      const sky = [];
+      for (let y = 0; y < SKY; y++) for (let x = 0; x < W; x++) sky.push(Yat(x, y));
+      const median = [...sky].sort((a, b) => a - b)[Math.floor(sky.length / 2)];
+      const chroma = (r, gg, b) => {
+        const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * gg + 0.0514459929 * b);
+        const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * gg + 0.1073969566 * b);
+        const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * gg + 0.6299787005 * b);
+        return Math.hypot(1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s);
+      };
+      let n = 0, sat = 0, clipped = 0;
+      const bands = { green: 0, cyan: 0, blue: 0, purple: 0 };
+      const lumas = [];
+      for (let y = 0; y < SKY; y++)
+        for (let x = 0; x < W; x++) {
+          const Y = sky[y * W + x];
+          const i = 4 * (y * W + x);
+          const r = px[i] / 255, gg = px[i + 1] / 255, b = px[i + 2] / 255;
+          // aurora: brighter than the sky around, or clearly coloured (dim violet counts too)
+          if (Y < 1.6 * median && chroma(lin(r), lin(gg), lin(b)) < 0.09) continue;
+          const mx = Math.max(r, gg, b);
+          const d = mx - Math.min(r, gg, b);
+          const h = d === 0 ? 0 : ((mx === r ? ((gg - b) / d) % 6 : mx === gg ? (b - r) / d + 2 : (r - gg) / d + 4) * 60 + 360) % 360;
+          n++;
+          sat += mx ? d / mx : 0;
+          if (mx >= 253 / 255) clipped++;
+          lumas.push(0.2126 * r + 0.7152 * gg + 0.0722 * b);
+          if (h >= 75 && h < 165) bands.green++;
+          else if (h >= 165 && h < 195) bands.cyan++;
+          else if (h >= 195 && h < 250) bands.blue++;
+          else if (h >= 250 && h < 345) bands.purple++;
+        }
+      lumas.sort((a, b) => a - b);
+      // reflection: each water pixel against the sky it mirrors (where that sky is bright)
+      const ratio = (d0, d1) => {
+        let w = 0, s = 0;
+        for (let yy = Math.ceil((1 - line + d0) * H); yy < Math.min(H, (1 - line + d1) * H); yy++) {
+          const depth = yy / H - (1 - line); // below the water line (screen heights)
+          const ys = Math.round((1 - line - depth * reach) * H);
+          if (ys < 0) continue;
+          for (let x = 0; x < W; x++) {
+            const Ys = Yat(x, ys);
+            if (Ys < Math.max(0.02, median)) continue;
+            w += Yat(x, yy);
+            s += Ys;
+          }
+        }
+        return s > 0 ? w / s : 0;
+      };
+      for (const k of Object.keys(bands)) bands[k] = n ? bands[k] / n : 0;
+      return { share: n / sky.length, sat: n ? sat / n : 0, peak: lumas[Math.floor(lumas.length * 0.995)] ?? 0, clipped: n ? clipped / n : 0, bands, near: ratio(0.03, 0.09), far: ratio(0.12, 0.175) };
+    },
+    { b64: png.toString('base64'), reach, line: WATER_LINE },
+  );
+}
+
+async function vividPass(page, dir, seekAndPlay) {
+  const { PROFILE } = await import('../src/scenes/profiles/standchen.js');
+  const reach = PROFILE.LOOK.WATER.REACH;
+  const playTo = (t) => page.waitForFunction((t) => window.__resonance.perf.t >= t, t, { timeout: 120000, polling: 50 });
+  const ribbons = () => page.evaluate(() => window.__resonance.manager.current.scene.auroraState.ribbons);
+  const rows = [];
+  console.log('    time   ribbons  aurora  sat    peak   clip   green  cyan   blue   purple  reflection near / far  fps');
+  const line = (label, f, rb, fps, shot) =>
+    console.log(`  ${label.padStart(7)}  ${String(rb).padStart(4)}     ${(f.share * 100).toFixed(0).padStart(3)} %  ${f.sat.toFixed(2)}   ${f.peak.toFixed(2)}   ${(f.clipped * 100).toFixed(1).padStart(4)}%  ${['green', 'cyan', 'blue', 'purple'].map((k) => `${(f.bands[k] * 100).toFixed(0).padStart(3)} % `).join(' ')}  ${f.near.toFixed(2)} / ${f.far.toFixed(2)}        ${fps.toFixed(0)}${shot ? '  [shot]' : ''}`);
+  let prev = -Infinity;
+  for (const t of VIVID_TIMES) {
+    if (t - prev < 30) await playTo(t);
+    else await seekAndPlay(t);
+    prev = t;
+    const file = VIVID_SHOTS.includes(t) ? path.join(dir, `vivid-${fmt(t).replace(':', 'm')}.png`) : null;
+    const f = await vividStats(page, file, reach);
+    const rb = await ribbons();
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    rows.push({ t, ribbons: rb, fps, file, ...f });
+    line(fmt(t), f, rb, fps, file);
+  }
+  // the muted palette at the climax, for comparison
+  await seekAndPlay(290);
+  await page.keyboard.press('v');
+  await sleep(300);
+  const muted = await vividStats(page, path.join(dir, 'muted-4m50.0.png'), reach);
+  await page.keyboard.press('v');
+  line('muted', muted, await ribbons(), await page.evaluate(() => window.__resonance.fps), true);
+  const at = (t) => rows.find((r) => r.t === t);
+  const climax = at(290);
+  const quiet = at(10);
+  const ok = (b) => (b ? 'PASS' : 'FAIL');
+  const checks = {
+    saturation: climax.sat > muted.sat + 0.15,
+    colours: ['green', 'blue', 'purple'].every((k) => climax.bands[k] >= 0.1),
+    ribbons: climax.ribbons >= 4 && quiet.ribbons <= 3,
+    reflection: climax.near >= 0.5 && climax.near <= 0.7,
+    quiet: quiet.sat < climax.sat && quiet.sat >= 0.45,
+  };
+  console.log(`  ${ok(checks.saturation)} climax saturation ${climax.sat.toFixed(2)} vs muted ${muted.sat.toFixed(2)} · ${ok(checks.colours)} green / blue / purple >= 10 % (${['green', 'blue', 'purple'].map((k) => (climax.bands[k] * 100).toFixed(0)).join(' / ')} %) · ${ok(checks.ribbons)} ribbons ${quiet.ribbons} quiet -> ${climax.ribbons} climax · ${ok(checks.reflection)} reflection ${climax.near.toFixed(2)} near the horizon (0.5-0.7) · ${ok(checks.quiet)} quiet calmer, still colourful (${quiet.sat.toFixed(2)})`);
+  return { rows, muted, checks };
+}
+
+async function matchPass(page, dir, seekAndPlay) {
+  const { PROFILE } = await import('../src/scenes/profiles/standchen.js');
+  const REF = PROFILE.LOOK.REFERENCE;
+  const refFile = path.join(ROOT, 'public', 'textures', 'aurora-reference-2.jpg');
+  const hasRef = fs.existsSync(refFile);
+  await seekAndPlay(MATCH_TIME);
+  const file = path.join(dir, `match-${fmt(MATCH_TIME).replace(':', 'm')}.png`);
+  const png = await page.screenshot({ path: file });
+  const pair = hasRef ? `data:image/jpeg;base64,${fs.readFileSync(refFile).toString('base64')}` : null;
+  const got = await regionStats(page, `data:image/png;base64,${png.toString('base64')}`, MATCH_REGIONS, pair);
+  let ref;
+  if (hasRef) {
+    ref = await regionStats(page, pair, MATCH_REGIONS, null);
+    const side = path.join(dir, `match-side-by-side.png`);
+    fs.writeFileSync(side, Buffer.from(got.pair.split(',')[1], 'base64'));
+    delete got.pair;
+    console.log(`  reference: ${path.relative(ROOT, refFile)} (measured) · side by side -> ${side}`);
+  } else {
+    const lumaOf = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255).reduce((s, v, i) => s + v * [0.2126, 0.7152, 0.0722][i], 0);
+    ref = Object.fromEntries([...Object.keys(MATCH_REGIONS), 'CORE'].map((k) => [k, { hex: REF[k], luma: lumaOf(REF[k]) }]));
+    ref.STARS = REF.STARS;
+    console.log(`  reference: PROFILE.LOOK.REFERENCE (no ${path.relative(ROOT, refFile)})`);
+  }
+  const rows = [];
+  console.log(`  at ${fmt(MATCH_TIME)}       result   luma   | reference luma  | Δluma   ΔE     hue/sat result -> ref`);
+  for (const k of [...Object.keys(MATCH_REGIONS), 'CORE']) {
+    const a = got[k];
+    const b = ref[k];
+    const dl = (a.luma - b.luma) / b.luma;
+    const [l1, a1, b1] = oklab(a.hex);
+    const [l2, a2, b2] = oklab(b.hex);
+    const dE = Math.hypot(l1 - l2, a1 - a2, b1 - b2);
+    const ok = Math.abs(dl) <= 0.15 && dE <= 0.05;
+    const h1 = hsv(a.hex);
+    const h2 = hsv(b.hex);
+    rows.push({ region: k, hex: a.hex, luma: a.luma, refHex: b.hex, refLuma: b.luma, dLuma: dl, dE, hue: h1.h, sat: h1.s, refHue: h2.h, refSat: h2.s, ok });
+    console.log(`  ${k.padEnd(13)} ${a.hex}  ${a.luma.toFixed(3)}  | ${b.hex}  ${b.luma.toFixed(3)}  | ${((dl >= 0 ? '+' : '') + (dl * 100).toFixed(0) + ' %').padStart(6)}  ${dE.toFixed(3)}  ${String(h1.h).padStart(3)}°/${h1.s.toFixed(2)} -> ${String(h2.h).padStart(3)}°/${h2.s.toFixed(2)}  ${ok ? 'ok' : 'OFF'}`);
+  }
+  const ds = (got.STARS - ref.STARS) / ref.STARS;
+  console.log(`  STARS         ${String(got.STARS).padStart(7)}         | ${String(ref.STARS).padStart(7)}         | ${((ds >= 0 ? '+' : '') + (ds * 100).toFixed(0) + ' %').padStart(6)}  ${Math.abs(ds) <= 0.5 ? 'ok' : 'OFF'}`);
+  const passed = rows.filter((r) => r.ok).length;
+  console.log(`  ${passed}/${rows.length} regions within 15 % luma and ΔE 0.05 · stars ${got.STARS} vs ${ref.STARS} · shot -> ${file}`);
+  return { time: MATCH_TIME, reference: hasRef ? 'image' : 'profile', rows, stars: got.STARS, refStars: ref.STARS, passed };
 }
 
 /**

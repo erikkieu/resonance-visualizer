@@ -115,12 +115,12 @@ export const PROFILE = {
       CURVE: 3, // the curtain path bends into a long arc (map units at the screen edges)
       STRIATION: 1.1, // vertical ray frequency (gentle)
       SHEET: 1.9, // curtain thickness (wide)
-      // colour: deep green -> teal, the packet's place set by the low note's height,
+      // colour: deep green -> green, the packet's place set by the low note's height,
       // the dominant low note twisting it by up to +/- HUE_DEG
       RAMP: [
-        [0.0, '#2f8f86'],
-        [0.5, '#5cc4ad'],
-        [1.0, '#7fd9c0'],
+        [0.0, '#2f9a58'],
+        [0.5, '#40b86a'],
+        [1.0, '#58c888'],
       ],
       HUE_RANGE: [0.1, 0.9],
       HUE_DEG: 15,
@@ -150,16 +150,16 @@ export const PROFILE = {
       CURVE: 2,
       STRIATION: 4.2, // finer rays
       SHEET: 1.0,
-      // colour (reference restyle): cool teal -> mint / seafoam -> pale mint, then cool blue-violet
-      // and a hint of pink only at the top; LOOK.RAYS.HUE_SPREAD keeps quiet notes around the mint
-      // centre and lets the climax open up the full range
+      // colour (reference restyle 2): deep green -> natural green -> cyan-green, then teal and violet
+      // only at the top; LOOK.RAYS.HUE_SPREAD keeps quiet notes near the green centre and lets the
+      // climax open up the range
       RAMP: [
-        [0.0, '#3fae9e'],
-        [0.3, '#7fd9c0'],
-        [0.55, '#a8f0d8'],
-        [0.78, '#9db8ee'],
-        [0.9, '#b38be6'],
-        [1.0, '#f3c6e6'],
+        [0.0, '#3aa860'],
+        [0.3, '#56c864'],
+        [0.5, '#62c890'],
+        [0.7, '#4cb4ae'],
+        [0.86, '#7c78cc'],
+        [1.0, '#a888d4'],
       ],
       HUE_RANGE: [0.04, 0.97],
       HUE_DEG: 15, // the note's pitch class twists its hue by up to +/- this
@@ -195,90 +195,194 @@ export const PROFILE = {
     },
   },
 
-  // ------------------------------------------------------- the look (reference restyle)
-  // public/textures/aurora-reference.jpg (local, not committed): a hazy, slightly
-  // desaturated teal fjord at night, a pale mint aurora of long vertical rays
-  // hanging from the upper sky, dark clouds rimmed warm peach on both sides,
-  // snowy mountains in a V, glassy water and a Viking longship. Colours are
-  // sRGB hex; the scene converts them to linear.
+  // ------------------------------------------------------- the look (reference restyle 2)
+  // public/textures/aurora-reference-2.jpg (local, not committed): a long-exposure
+  // photograph looking up into a big green aurora overhead, above a calm fjord.
+  // Sky and aurora fill the top two thirds of the frame, a low band of snowy
+  // mountains sits under them, dark green water fills the bottom. Colours are
+  // sRGB hex *as seen on screen*: the scene inverts the tone curve (ACES at
+  // exposure 1) so a plain hex here comes out close to that hex in the frame
+  // (additive terms only roughly). `npm run verify -- standchen --match`
+  // measures the frame region by region against REFERENCE.
   LOOK: {
+    // The curtains in perspective, seen from below: every ray runs along a straight line
+    // toward a vanishing point near the top of the frame, so the sky is laid out around it
+    // (angle = the place along a curtain, distance = the height on it).
+    CURTAINS: {
+      VP: [0.62, 1.12], // the vanishing point (screen x 0..1, height 0..1; just above the top edge, centre-right)
+      SPREAD: 0.55, // the packets' 0..1 screen range = 0.5 + SPREAD × sin(angle around the VP)
+      BEND: 0.014, // screen heights per map unit of the curtains' meander, folds and the packets' bow (curtains.frag)
+      // the big loop in the upper left: the sky is twisted around this point (screen x, height); the
+      // twist swells and relaxes slowly, so the loop forms and unravels
+      CURL: { X: 0.3, Y: 0.8, TWIST: 2.3, RADIUS: 0.24, SWAY: 0.45, RATE: 0.017 }, // twist (radians), radius (screen heights), sway (share), Hz
+      BILLOW_FREQUENCY: 2.2, // the ribbons' domain-warped folds (per screen height; amplitude and rate per ribbon)
+      EDGE_ON: 0.3, // brighter where a fold is seen edge-on
+      CONVERGE: 1.2, // extra glow where the rays bunch up toward the VP (× at the VP, gone by 0.75 screen heights)
+      LEFT_FADE: 0.92, // the aurora fades toward the far left, below the loop (darkest there)
+      LOW_GAIN: 2.6, // × the low layer's light: the far curtains glow just above the mountains
+      GAIN: 2.4, // × curtain light (× PALETTE.GAIN)
+      FAN: 0.22, // at the climax the ribbons fan wide (share of the view angle they gain)
+      // band -> height: the low ribbons grow with the bass, the melody ribbons with mid / treble
+      BAND_HEIGHT: { LOW: 0.35, MELODY: 0.3 },
+    },
+    // The ribbons (up to 6 in aurora.frag): each rides one row of the curtain lookup table (its
+    // waves, light and colour: rows 0-1 = the melody layer, high in the sky; 2-3 = the low
+    // chords, down toward the mountains) with its own lower edge (distance from the VP), tilt,
+    // level (FLAT: 0 = an arc overhead, 1 = level, far), ray LENGTH, soft lower EDGE_SOFT,
+    // brightness, colour offset on its ramp (HUE), drift along the sky (SHIFT, lookup units / s:
+    // the thin foreground ribbons slide past the others), billow (amplitude, rate) and the
+    // aurora amplitude from which it shows (SHOW): 3 when quiet, all 6 when loud.
+    RIBBONS: [
+      { NAME: 'main', ROW: 2, EDGE: 0.7, TILT: 0.04, FLAT: 0.8, LENGTH: 0.45, EDGE_SOFT: 0.06, BRIGHT: 1.0, HUE: -0.18, SHIFT: 0, BILLOW: 0.11, RATE: 0.012, SHOW: 0 },
+      { NAME: 'overhead', ROW: 0, EDGE: 0.46, TILT: 0.1, FLAT: 0.15, LENGTH: 0.5, EDGE_SOFT: 0.06, BRIGHT: 1.0, HUE: -0.12, SHIFT: 0, BILLOW: 0.1, RATE: 0.01, SHOW: 0 },
+      { NAME: 'violet', ROW: 1, EDGE: 0.6, TILT: -0.06, FLAT: 0.45, LENGTH: 0.4, EDGE_SOFT: 0.06, BRIGHT: 1.15, HUE: 0.42, SHIFT: 0, BILLOW: 0.13, RATE: -0.014, SHOW: 0 },
+      { NAME: 'far blue', ROW: 3, EDGE: 0.83, TILT: 0.02, FLAT: 1.0, LENGTH: 0.26, EDGE_SOFT: 0.07, BRIGHT: 1.0, HUE: 0.45, SHIFT: 0, BILLOW: 0.08, RATE: 0.009, SHOW: 0.25 },
+      { NAME: 'thin cyan', ROW: 0, EDGE: 0.36, TILT: 0.05, FLAT: 0.1, LENGTH: 0.16, EDGE_SOFT: 0.035, BRIGHT: 0.8, HUE: 0.02, SHIFT: 0.018, BILLOW: 0.16, RATE: 0.03, SHOW: 0.35 },
+      { NAME: 'thin magenta', ROW: 1, EDGE: 0.54, TILT: -0.1, FLAT: 0.3, LENGTH: 0.14, EDGE_SOFT: 0.035, BRIGHT: 0.95, HUE: 0.62, SHIFT: -0.014, BILLOW: 0.15, RATE: -0.026, SHOW: 0.5 },
+    ],
+    // V switches between the vivid palette and the muted one of the reference photo
+    PALETTE: {
+      VIVID: true,
+      vivid: {
+        // melody (high ribbons): emerald -> lime -> turquoise -> electric blue -> violet -> magenta
+        MELODY: [
+          [0.0, '#1fd46a'],
+          [0.18, '#3dff8a'],
+          [0.38, '#2de0e0'],
+          [0.58, '#3a8cff'],
+          [0.8, '#a24dff'],
+          [1.0, '#ff5de0'],
+        ],
+        // low chords (large lower ribbons): emerald -> lime -> turquoise -> blue
+        LOW: [
+          [0.0, '#1fd46a'],
+          [0.55, '#3dff8a'],
+          [0.85, '#2de0e0'],
+          [1.0, '#3a8cff'],
+        ],
+        HUE_CENTRE: 0.32, // melody hue around this (low notes toward green / blue, high toward violet / magenta) ...
+        HUE_SPREAD: [0.75, 1.0], // ... over this share of the ramp [quiet, climax]
+        SATURATION: [1.15, 1.3], // colour saturation [quiet, loud] (by amplitude)
+        GAIN: 1.35, // × curtain light: HDR cores above 1
+        CAP: 2.2, // soft per-pixel cap (HDR)
+        CORE: '#e8fff0', // near-white cores ...
+        CORE_AMOUNT: 0.3, // ... in the brightest lower parts
+        ZONE: 0.28, // ramp shift from each curtain's lower edge to its top (green -> cyan -> blue / violet)
+        FRINGE: '#ff5de0', // magenta fringe ...
+        FRINGE_AMOUNT: 0.6, // ... at the very top of the strongest rays
+        GRADE_SATURATION: 1.1,
+        SKY_WASH: 0.15, // the aurora's wash over the sky (LOOK.SKY.WASH in the muted look): the gaps stay dark
+        AMBIENT_CAP: 0.1, // soft cap of the aurora's average light on sky, mountains and water (0 = none)
+        TONE: 'soft', // composite tone curve: ACES darks, hue-keeping highlight shoulder
+      },
+      // the reference photo's look (reference restyle 2): AURORA.MELODY / LOW ramps, natural green
+      muted: { HUE_CENTRE: 0.3, HUE_SPREAD: [0.25, 1.0], SATURATION: [0.95, 1.0], GAIN: 1, CAP: 0.75, CORE: '#ffffff', CORE_AMOUNT: 0.08, ZONE: 0, FRINGE: '#ffffff', FRINGE_AMOUNT: 0, GRADE_SATURATION: 1.0, SKY_WASH: 0.5, AMBIENT_CAP: 0, TONE: true },
+    },
     RAYS: {
-      DEPTH: [6.5, 9, 13, 18], // curtain distances (map units): melody near, low far
-      BASE: 1.25, // altitude of the ray bottoms above the eye (higher = rays hang from higher up)
-      TALL: 1.45, // × the slice span: the rays reach far up into the sky
-      LOW_EDGE: 0.14, // soft lower edge (share of the ray height)
-      FADE: 1.6, // brightness fade toward the top (exp rate per ray height)
-      CORE: 0.5, // near-white cores in the bright lower part
-      FAN: 0.45, // rays converge upward, as seen from below (0 = parallel)
-      FAN_CENTRE: 0.55, // screen x the rays point to
-      STREAK: 5, // px blur along the rays: the long-exposure streak (NOISE.BLUR is across)
-      SWAY: { AMP: 0.012, RATE: 0.035 }, // slow sway of the ray bundle (screen widths at the top, Hz)
-      GAIN: 0.5, // × aurora brightness (the restyle's aurora is larger and nearer; keeps SCALE.BRIGHT's quiet / loud range)
-      STRIATION: { CONTRAST: 0.7, FREQUENCY: 1.4 }, // the long vertical streaks (override NOISE.RAY_CONTRAST / FREQUENCY)
-      SATURATION: [0.75, 1.0], // aurora saturation [quiet, climax]: the climax opens up the colour
-      HUE_SPREAD: [0.4, 1.0], // melody hue range around HUE_CENTRE [quiet, climax]
-      HUE_CENTRE: 0.3, // mint on the melody ramp
+      DEPTH: [6.5, 9, 13, 18], // curtain distances in the lookup table (map units): sets how far a packet runs per screen width
+      FADE: 2.2, // brightness fade toward the top (per ray length)
+      STREAK: 7, // px blur along the rays (toward the VP): the long exposure; NOISE.BLUR is across them
+      // broad soft rays: low-frequency noise across the rays, stretched along them
+      TEXTURE: { CONTRAST: 0.45, FREQUENCY: 16, ALONG: 1.0 }, // depth, per radian across, per screen height along
+      GAIN: 0.5, // × aurora brightness (keeps SCALE.BRIGHT's quiet / loud range)
+      STRIATION: { CONTRAST: 0.75, FREQUENCY: 0.55 }, // the lookup table's rays (override NOISE.RAY_CONTRAST / FREQUENCY)
     },
     SKY: {
-      WASH: 0.15, // the aurora's light washes the sky teal-green around it
-      HAZE: { COLOR: '#22393c', STRENGTH: 0.4, HEIGHT: 0.045 }, // low mist over the horizon (view-ray height)
-      SHORE_GLOW: 0.12, // aurora glow where the far shore meets the water (was 0.5: the green band)
+      // (the base gradient is NIGHT.SKY: teal-grey patches between the curtains)
+      AIRGLOW: '#0b1a14', // a soft green wash over the whole sky (added)
+      WASH: 0.5, // the aurora's own light washes the sky green around it
+      CORNERS: 0.6, // darker at the far left and the upper corners
+      GAP: { COLOR: '#3a2a50', AMOUNT: 0.08 }, // faint violet in the dark gaps between the curtains
+      HAZE: { COLOR: '#2a4a3a', STRENGTH: 0.2, HEIGHT: 0.035 }, // low mist over the mountains (view-ray height)
+      SHORE_GLOW: 0.06, // aurora glow where the far shore meets the water
     },
-    STARS: { DENSITY: 0.45, SIZE: 0.6, BEHIND_AURORA: 25 }, // share of the old field, size, dimming behind the aurora
+    STARS: { DENSITY: 0.38, SIZE: 0.5, BEHIND_AURORA: 6 }, // share of the old field (~500 visible), size, dimming behind the aurora
     CLOUDS: {
-      ON: true, // C
-      SCALE: 2.6, // fbm frequency (per screen height)
+      // very subtle: thin, dark, wispy, cool, low opacity (C)
+      ON: true,
+      OPACITY: 0.28,
+      SCALE: 2.2, // fbm frequency (per screen height)
+      STRETCH: 3.2, // stretched sideways into wisps
       OCTAVES: 4,
-      COVER: 0.46, // density threshold: higher = fewer clouds
-      SOFT: 0.22, // edge softness
-      SIDES: [-0.12, 0.3], // inner edges of the left / right cloud banks (x in screen heights from the centre)
-      BAND: [0.08, 0.6], // lowest / highest cloud (screen heights above the horizon)
-      BODY: '#141c24', // dark blue-grey
-      AURORA_TINT: 0.18, // the aurora lights the bodies green
-      RIM: ['#e8946a', '#f2b58a'], // warm rim: deep -> bright
-      RIM_STRENGTH: 0.8,
-      RIM_WIDTH: 0.06, // how far toward the light the rim test looks (screen heights)
-      LIGHT: [-0.08, -0.06], // the low light source (below the horizon, screen heights from the centre)
-      DRIFT: [0.004, 0.007], // drift speeds of the two layers (screen heights per second)
-      BASS_GAIN: 0.35, // the rims brighten with bass / swells
-      DAWN_GAIN: 1.2, // ... and toward dawn
+      COVER: 0.52, // density threshold: higher = fewer clouds
+      SOFT: 0.25, // edge softness
+      SIDES: [-0.25, 0.45], // inner edges of the left / right banks (x in screen heights from the centre)
+      BAND: [0.03, 0.45], // lowest / highest cloud (screen heights above the mountains' foot)
+      BODY: '#16232a', // dark blue-grey ...
+      AURORA_TINT: 0.12, // ... with a faint green tint from the aurora
+      RIM: ['#e8946a', '#f2b58a'], // (warm rims: off)
+      RIM_STRENGTH: 0,
+      RIM_WIDTH: 0.06,
+      LIGHT: [-0.08, -0.06],
+      DRIFT: [0.004, 0.007], // drift speeds of the two banks (screen heights per second)
+      BASS_GAIN: 0,
+      DAWN_GAIN: 0,
     },
     MOUNTAINS: {
-      ROCK: '#2a3540', SNOW: '#a9bcc6', // blue-grey rock, pale snow
-      HAZE: [0.65, 0.4, 0.12], // haze over the [far, middle, near] layers: atmospheric perspective
-      SKY_LIGHT: 0.6, // the sky (aurora, haze) lights the snow
+      ROCK: '#2a4637', // dark blue-green rock
+      SNOW: '#3a5848', // the snow streaks, unlit
+      RIM: 1.4, // the aurora lights the ridges green (× its average light), brightest at the crest
+      SKY_LIGHT: 0.22, // the aurora lights the snow
+      LIT: { AMP: [0.1, 0.45], LIGHT: [0.4, 1] }, // ROCK / SNOW as given from aurora amplitude AMP[1] up, × LIGHT[0] when faint (dark silhouettes)
+      HAZE: [0.55, 0.28, 0.1], // haze over the [far, middle, near] layers
     },
+    // A dark, calm, glassy mirror of the whole sky (R toggles the reflection)
     WATER: {
-      RIPPLE: 0.45, // ripple displacement (× the old amplitude): glassy
-      FINE: 2.2, // finer, more horizontal ripples
-      DARK: '#03080a',
-      RINGS: 0.3, // rings spreading from the ship (× the ripple slope)
-      NOTE_RINGS: 0.5, // extra rings on strong melody notes (decays over 2 s)
+      ON: true, // R
+      TOP: '#0e1d16', // the water's own colour at the horizon ...
+      BOTTOM: '#060d0a', // ... and at the bottom
+      REFLECT: [0.66, 0.3], // reflection × the sky's brightness [at the horizon, at the bottom] (Fresnel)
+      FRESNEL: 1.4, // falloff exponent with distance from the horizon
+      REACH: 3.0, // it mirrors this much more of the sky than a plain mirror would (shows the aurora)
+      BLUR: [0.003, 0.045], // vertical streaking of the reflection [at the horizon, at the bottom] (screen heights)
+      WOBBLE: 0.01, // horizontal ripple wobble of the reflection at the bottom (screen widths; ~0 at the horizon)
+      RIPPLE: 0.3, // small, slow surface ripples (displacement)
+      FINE: 1.6, // ripple fineness
+      SPEED: 0.15, // slow
+      STARS: 0.55, // reflected stars (× the sky's)
+      GLOW: 0.35, // coloured glow on the water near the horizon (× the reflected aurora there)
+      SHORE: 0.5, // aurora glow along the shoreline (the mountains' reflection)
+      // note onsets send soft rings across the water (strong notes only, a few at a time)
+      ONSET_RINGS: { MAX: 4, MIN_GAP: 0.7, MIN_STRENGTH: 0.55, SPEED: 2.5, WIDTH: 0.7, LIFE: 6, AMP: 0.5 }, // s, note strength, water units / s, units, s, × slope
+      RINGS: 0.3, // rings spreading from the ship (when shown)
+      NOTE_RINGS: 0.5,
       ROCKS: false, // the old foreground boulders
     },
     SHIP: {
-      ON: true, // B
-      X: 0.63, // screen x of its centre at 0:00
-      WATERLINE: 0.262, // screen height of its waterline (the horizon is at 0.30)
-      SIZE: 0.125, // half its length (screen widths): 25 % of the width
+      ON: false, // B (hidden in this look)
+      X: 0.63,
+      WATERLINE: 0.15, // screen height of its waterline (the horizon is at 0.18)
+      SIZE: 0.11,
       DRIFT: 0.012, // screen widths per minute, toward the left
-      BOB: 0.0018, // screen heights
-      ROLL: 0.012, // radians
+      BOB: 0.0018,
+      ROLL: 0.012,
       HULL: '#05080a',
-      SAIL: '#8fa39c', // pale grey-green
-      SAIL_LIGHT: 0.2, // the aurora lights the sail
-      LIGHT: '#ffa65a', // lanterns / shield highlights
+      SAIL: '#8fa39c',
+      SAIL_LIGHT: 0.2,
+      LIGHT: '#ffa65a',
       LIGHT_STRENGTH: 0.9,
-      MELODY_GAIN: 0.6, // the lights glow brighter with the melody
-      FLICKER: 0.12, // soft, slow
-      BILLOW: [0.05, 0.11], // sail curve [still, full bass]
+      MELODY_GAIN: 0.6,
+      FLICKER: 0.12,
+      BILLOW: [0.05, 0.11],
     },
     GRADE: {
-      LIFT: '#061214', // lifted blacks, teal
-      SATURATION: 0.82, // overall, except the warm accents
-      WARM_KEEP: 1.1, // saturation of the warm hues (cloud rims, ship lights)
-      VIGNETTE: 0.55,
-      BLOOM: { THRESHOLD: 0.32, STRENGTH: 0.85 },
+      LIFT: '#050c0b', // lifted blacks, teal (as seen)
+      SATURATION: 1.0, // overall
+      WARM_KEEP: 0.9, // saturation of the warm hues
+      VIGNETTE: 0.3, // subtle
+      BLOOM: { THRESHOLD: 0.75, STRENGTH: 0.55 }, // subtle, on the brightest cores (and the reflection's glow)
+    },
+    // the region means the --match check compares against (from the reference photo's description)
+    REFERENCE: {
+      TOP_SKY: '#2f5a47', // top 15 %: the curtains converging, fading into the sky wash
+      AURORA_MID: '#417657', // 20-55 %: the curtains' body
+      DARK_LEFT: '#20373d', // x 0-15 %, y 35-60 %: the dark patch at the far left
+      HORIZON_GLOW: '#417657', // 55-65 %: the glowing lower edges over the mountains
+      MOUNTAINS: '#2a4637', // 68-82 %
+      FAR_WATER: '#243e31', // 84-92 %
+      NEAR_WATER: '#1e3127', // 92-100 %
+      CORE: '#72c883', // the curtains' bright cores (brightest 2 % of the sky)
+      STARS: 500,
     },
   },
 
@@ -305,8 +409,8 @@ export const PROFILE = {
     SMOOTHING: 1.5, // s (seeks jump at once)
     SKY: {
       // [horizon, zenith] at night 0 and at night 1 (mixed by night)
-      DUSK: [[0.02, 0.05, 0.08], [0.008, 0.02, 0.05]],
-      NIGHT: [[0.01, 0.028, 0.03], [0.002, 0.005, 0.011]], // (reference: teal haze at the horizon, blue-black zenith)
+      DUSK: [[0.045, 0.07, 0.11], [0.026, 0.042, 0.075]], // deep blue-teal
+      NIGHT: [[0.045, 0.085, 0.095], [0.03, 0.055, 0.072]], // (reference 2: teal-grey #20373d between the curtains, darker up high)
     },
     // the low glow at dusk: warm (night 0) cooling to teal-blue, gone by night FADE
     DUSK_GLOW: { WARM: [0.34, 0.12, 0.07], COOL: [0.03, 0.09, 0.12], COOL_AT: [0.15, 0.45], FADE: 0.62, HEIGHT: 0.09, STRENGTH: 1 },
@@ -321,7 +425,7 @@ export const PROFILE = {
     // the aurora: pale and faint at dusk, vivid at night, giving way to dawn
     AURORA: { GAIN: [0.55, 1.0], SATURATION: [0.4, 1.0], DAWN_FADE: 0.45 },
     WATER: [0.006, 0.014, 0.024], // base water colour at night 0 (night 1: almost black)
-    SNOW: 0.6, // how much the dusk / dawn glow lights the snow
+    SNOW: 0.3, // how much the dusk / dawn glow lights the snow
   },
 };
 
@@ -359,17 +463,28 @@ export const TUNE = [
   ['AURORA.NOISE.EDGE', 'noise: edge softness', 1, 2.5, 0.05],
   ['AURORA.NOISE.SMOOTH.RELEASE', 'noise: audio release (s)', 0.1, 3, 0.05],
   { group: 'look' },
-  ['LOOK.RAYS.FAN', 'rays: fan', 0, 1.5, 0.05],
+  ['LOOK.CURTAINS.GAIN', 'curtains: light', 0, 8, 0.1],
+  ['LOOK.CURTAINS.BEND', 'curtains: bend', 0, 0.06, 0.002],
+  ['LOOK.CURTAINS.CURL.TWIST', 'curtains: loop twist', 0, 4, 0.05],
+  ['LOOK.CURTAINS.FAN', 'curtains: climax fan', 0, 0.6, 0.01],
+  ['LOOK.PALETTE.vivid.GAIN', 'vivid: peak brightness', 0.5, 5, 0.05],
+  ['LOOK.PALETTE.vivid.SATURATION.1', 'vivid: saturation (loud)', 0.5, 2, 0.02],
+  ['LOOK.PALETTE.vivid.ZONE', 'vivid: colour zones', 0, 0.8, 0.01],
+  ['LOOK.PALETTE.vivid.FRINGE_AMOUNT', 'vivid: magenta fringe', 0, 1, 0.02],
+  ['LOOK.CURTAINS.EDGE_ON', 'curtains: edge-on glow', 0, 2, 0.05],
   ['LOOK.RAYS.STREAK', 'rays: streak blur (px)', 0, 24, 0.5],
-  ['LOOK.RAYS.BASE', 'rays: bottom altitude', 0.5, 3, 0.05],
-  ['LOOK.RAYS.CORE', 'rays: white cores', 0, 1, 0.05],
-  ['LOOK.RAYS.SATURATION.0', 'rays: saturation (quiet)', 0, 1.2, 0.02],
-  ['LOOK.SKY.HAZE.STRENGTH', 'haze', 0, 1, 0.02],
-  ['LOOK.SKY.WASH', 'sky wash', 0, 1.5, 0.05],
-  ['LOOK.CLOUDS.COVER', 'clouds: cover', 0.2, 0.8, 0.01],
-  ['LOOK.CLOUDS.RIM_STRENGTH', 'clouds: warm rim', 0, 2, 0.05],
-  ['LOOK.SHIP.SIZE', 'ship: size', 0.05, 0.2, 0.005],
-  ['LOOK.SHIP.LIGHT_STRENGTH', 'ship: lights', 0, 3, 0.05],
+  ['LOOK.RAYS.FADE', 'rays: fade up', 0.5, 5, 0.05],
+  ['LOOK.RAYS.TEXTURE.CONTRAST', 'rays: texture', 0, 1, 0.02],
+  ['LOOK.SKY.WASH', 'sky: aurora wash', 0, 2, 0.05],
+  ['LOOK.SKY.CORNERS', 'sky: dark corners', 0, 1, 0.02],
+  ['LOOK.SKY.GAP.AMOUNT', 'sky: violet gaps', 0, 0.3, 0.01],
+  ['LOOK.STARS.DENSITY', 'stars: density', 0, 3, 0.05],
+  ['LOOK.CLOUDS.OPACITY', 'clouds: opacity', 0, 1, 0.02],
+  ['LOOK.MOUNTAINS.RIM', 'mountains: green rim', 0, 4, 0.05],
+  ['LOOK.WATER.REFLECT.0', 'water: reflection (horizon)', 0, 1, 0.01],
+  ['LOOK.WATER.REFLECT.1', 'water: reflection (bottom)', 0, 1, 0.01],
+  ['LOOK.WATER.WOBBLE', 'water: wobble', 0, 0.04, 0.001],
+  ['LOOK.WATER.GLOW', 'water: horizon glow', 0, 1.5, 0.05],
   ['LOOK.GRADE.SATURATION', 'grade: saturation', 0.3, 1.3, 0.02],
   ['LOOK.GRADE.VIGNETTE', 'grade: vignette', 0, 1, 0.02],
   { group: 'night' },

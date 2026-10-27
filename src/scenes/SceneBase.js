@@ -17,7 +17,8 @@
  *
  * Static-ish properties read by the manager:
  *   renderScale  fraction of the canvas resolution the output target uses
- *   toneMapped   apply ACES in the final composite
+ *   toneMapped   apply ACES in the final composite ('soft': ACES in the darks, a
+ *                hue-keeping highlight shoulder, so bright colours stay colourful)
  *   exposure     linear exposure before tone mapping
  *   dither       final dither amplitude in 1/255 steps (default 1)
  *   ditherAnimated  re-seed the dither every frame (default true)
