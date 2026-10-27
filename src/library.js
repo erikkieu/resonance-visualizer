@@ -3,7 +3,8 @@ import { PIECES, MUSIC_DIR, ANALYSIS_DIR, pieceForFile, pieceForScene } from './
 import { ScoreMap } from './scoreMap.js';
 
 /**
- * library.js: finds each scene's piece in /public/Music and keeps the score
+ * library.js: finds each scene's piece in /public/Music (or where it is
+ * hosted publicly, `url` in pieces.js, for the published site) and keeps the score
  * follower (audio.perf) pointed at the analysis of whatever is playing.
  *
  * A library piece always gets its analysis. A dropped file gets it too when
@@ -16,10 +17,10 @@ const DURATION_TOLERANCE = 2; // s
 const base = import.meta.env.BASE_URL;
 const files = PIECES.map((p) => [p.id, library.music.find((f) => p.match.test(f.normalize('NFC')))]);
 
-/** URL of a piece's audio file, or null when it is not in /public/Music. */
+/** URL of a piece's audio: the file in /public/Music, else where it is hosted (`url`), else null. */
 export function pieceUrl(piece) {
   const file = files.find(([id]) => id === piece?.id)?.[1];
-  return file ? `${base}${MUSIC_DIR}/${encodeURIComponent(file)}` : null;
+  return file ? `${base}${MUSIC_DIR}/${encodeURIComponent(file)}` : piece?.url ?? null;
 }
 
 export const hasAnalysis = (id) => library.analysis.includes(`${id}.json`);

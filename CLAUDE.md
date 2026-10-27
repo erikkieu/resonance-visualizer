@@ -5,6 +5,7 @@ A five-scene WebGL music visualizer (Vite, vanilla ES modules, Three.js, custom 
 ## Rules
 
 - **Never commit audio.** Pieces live in `public/Music/` (gitignored by extension: mp3/wav/flac/ogg/m4a/aac/webm). Don't move, rename or re-encode them; `src/pieces.js` matches files by leading number / name.
+- **Never re-host audio on the public site either.** The published site (no `public/Music`) streams a piece only from where it is already hosted publicly with CORS: `url` in `src/pieces.js` (`pieceUrl` prefers the local file). Linked so far (2026-10-27, user; byte-identical to the analysed files): Drottningholm and Eine kleine Nachtmusik from archive.org. The Ständchen, Andante Festivo and Interstellar have no source yet: on the site they work by drag and drop (name + length match → full analysis). The user's recordings are commercial (tags: 1975 / 1978 LPs) or Pixabay (no standalone redistribution), so publishing the files was declined.
 - `public/analysis/*.json` is derived data and fine to commit. Regenerate it with `npm run analyze`; that **keeps the hand-edited `manual` block** of each JSON.
 - Commit or push only when the user asks. Build on the user's own work in the scenes and shaders; don't revert it.
 - Keep every tuning constant in one config object per scene/profile, with the important ones exposed as live sliders (T panel).
