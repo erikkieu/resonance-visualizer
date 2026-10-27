@@ -5,6 +5,8 @@
  *   bass    20-150 Hz
  *   mid     150-2000 Hz
  *   treble  2000-12000 Hz
+ *   lower   60-350 Hz, the low strings' register (cellos, basses)
+ *   upper   1000-5000 Hz, the violins' register
  *   energy  overall RMS loudness
  *   beat    onset pulse: jumps to 1 on a detected beat, then decays
  *   beatId  increments once per beat (scenes compare it to spawn one-shot events)
@@ -115,6 +117,8 @@ const BANDS = {
   bass: [20, 150],
   mid: [150, 2000],
   treble: [2000, 12000],
+  lower: [60, 350],
+  upper: [1000, 5000],
 };
 
 // Attack / release time constants (seconds): fast rise, slow fall.
@@ -122,6 +126,8 @@ const SMOOTHING = {
   bass: [0.035, 0.32],
   mid: [0.05, 0.4],
   treble: [0.02, 0.22],
+  lower: [0.08, 0.5],
+  upper: [0.06, 0.45],
   energy: [0.08, 0.7],
 };
 
@@ -147,6 +153,24 @@ class PeakNormalizer {
   process(value, dt) {
     this.peak = Math.max(value, this.peak * Math.exp(-dt / this.decay), this.floor);
     return Math.min(1, value / this.peak);
+  }
+}
+
+/**
+ * Like PeakNormalizer, but also tracks a slowly rising floor, so a band that
+ * never drops far (the strings' registers in dB) still spans 0..1: 0 at the
+ * recent floor, 1 at the recent peak.
+ */
+class RangeNormalizer extends PeakNormalizer {
+  constructor(floor, decay = 9) {
+    super(floor, decay);
+    this.low = 1;
+  }
+
+  process(value, dt) {
+    this.peak = Math.max(value, this.peak * Math.exp(-dt / this.decay), this.floor);
+    this.low = Math.min(value, this.low + (this.peak - this.low) * (1 - Math.exp(-dt / this.decay)));
+    return clamp01((value - this.low) / Math.max(this.floor, this.peak - this.low));
   }
 }
 
@@ -198,6 +222,8 @@ class AudioEngine {
     this.bass = 0;
     this.mid = 0;
     this.treble = 0;
+    this.lower = 0;
+    this.upper = 0;
     this.energy = 0;
     this.beat = 0;
     this.beatId = 0;
@@ -274,6 +300,8 @@ class AudioEngine {
       bass: new PeakNormalizer(0.08, 20),
       mid: new PeakNormalizer(0.06, 20),
       treble: new PeakNormalizer(0.04, 20),
+      lower: new RangeNormalizer(0.08, 45),
+      upper: new RangeNormalizer(0.05, 45),
       energy: new PeakNormalizer(0.02, 40),
     };
     // pitch height history for the adaptive range
@@ -618,6 +646,8 @@ class AudioEngine {
       bass: Math.pow(n.bass.process(band(this.bins.bass), dt), 1.8),
       mid: Math.pow(n.mid.process(band(this.bins.mid), dt), 1.6),
       treble: Math.pow(n.treble.process(band(this.bins.treble), dt), 1.5),
+      lower: Math.pow(n.lower.process(band(this.bins.lower), dt), 1.8),
+      upper: Math.pow(n.upper.process(band(this.bins.upper), dt), 1.8),
       energy: Math.pow(n.energy.process(rms, dt), 1.25),
     };
   }
@@ -871,6 +901,8 @@ class AudioEngine {
         bass: 0.22 + 0.16 * breathe + 0.12 * Math.max(0, Math.sin(t * 1.1)) ** 3,
         mid: 0.22 + 0.12 * Math.sin(t * 0.31 + 1.3) + 0.06 * Math.sin(t * 0.83),
         treble: 0.14 + 0.08 * (0.5 + 0.5 * Math.sin(t * 2.3 + Math.sin(t * 0.7) * 2)),
+        lower: 0.24 + 0.14 * breathe,
+        upper: 0.18 + 0.06 * Math.sin(t * 0.47),
         energy: 0.14 + 0.1 * breathe + 0.03 * Math.sin(t * 0.13),
         beat: beatNow,
       };
@@ -905,6 +937,8 @@ class AudioEngine {
       bass: clamp01(0.12 + 0.75 * kick + 0.1 * section),
       mid: clamp01(0.2 + 0.35 * section + 0.35 * snare * swell + 0.08 * Math.sin(t * 0.9)),
       treble: clamp01(0.12 + 0.5 * hat * swell + 0.2 * section),
+      lower: clamp01(0.15 + 0.4 * kick + 0.25 * section),
+      upper: clamp01(0.15 + 0.3 * hat * swell + 0.3 * section),
       energy: clamp01(0.12 + 0.72 * section + 0.12 * kick),
       beat: beatNow,
     };
@@ -1013,7 +1047,7 @@ class AudioEngine {
       this.lowNote = this.dominantNote;
     }
 
-    for (const k of ['bass', 'mid', 'treble', 'energy']) {
+    for (const k of ['bass', 'mid', 'treble', 'lower', 'upper', 'energy']) {
       const target = live ? synth[k] * (1 - m) + live[k] * m : synth[k];
       const [atk, rel] = SMOOTHING[k];
       this[k] = follow(this[k], target, dt, atk, rel);

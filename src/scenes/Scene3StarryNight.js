@@ -47,8 +47,13 @@ import finalFrag from '../shaders/starry/final.frag?raw';
  * with any other source it runs on the live analyser. How the piece is
  * painted (section states, melody light and lift, star blooms on melody
  * notes, ripples on the accompaniment) lives in profiles/andanteFestivo.js and is
- * tunable live with T. Bass makes the moon and the spiral breathe, treble
- * twinkles, energy sways the cypress.
+ * tunable live with T. The low strings make the great spiral and the moon
+ * breathe and sway the cypress; the violins light the halos and twinkle.
+ * The painting breathes with the strings (the flow speed follows the
+ * loudness and its momentum), turns from night blue to gold at the climaxes
+ * (the main one fully), and settles to near stillness at the end.
+ *
+ * Keys: [ ] reactivity (also a slider in the D overlay).
  */
 
 // ====================================================================== config
@@ -106,11 +111,7 @@ const CONFIG = {
     { strokes: 0.4, canvas: 0.6 },
   ],
 
-  BURSTS: { COUNT: 24, STROKES: 96, LIFE: 2.5, PULSE_DECAY: 2.5 }, // onset bloom capacity
-  IDLE_SPEED: 0.4, // flow speed with nothing playing
-  MOON_GLOW: 0.22,
-  BASS: { SPIRAL: 0.08 }, // breathing of the spiral (the moon glow breathes in the shader)
-  SWAY: { MIN: 0.004, GAIN: 0.02, SMOOTHING: 1.0 }, // cypress sway amplitude from energy
+  BURSTS: { COUNT: 24, STROKES: 96, LIFE: 2.5 }, // onset bloom capacity
   POINTER: { RADIUS: 0.06, MAX_MOVE: 0.03 },
 };
 // ============================================================================
@@ -157,37 +158,86 @@ function heightColor(h, out) {
 }
 const STAGE_KEYS = Object.keys(PROFILE.STAGES.calm);
 
+// a [quiet, loud] range at x, widened by the reactivity r around its geometric middle
+const react = ([a, b], x, r) => {
+  const m = Math.sqrt(a * b);
+  return m * ((a + (b - a) * x) / m) ** r;
+};
+const smooth01 = (x) => smoothstep(0, 1, x);
+// linear up to lo, then easing toward hi
+const softLimit = (v, [lo, hi]) => (v <= lo ? v : lo + (hi - lo) * (1 - Math.exp(-(v - lo) / (hi - lo))));
+// a section's role when there is no score (the live stage)
+const ROLE_OF_STAGE = { calm: 'hush', building: 'build', climax: 'climax', resolving: 'release' };
+const SECTION_KEYS = ['MOVE', 'GLOW', 'WARMTH'];
+/** The energy state of a section `role`, cross-fading (0..1) into `next`'s. */
+function sectionMix(role, next, cross, out = {}) {
+  const S = PROFILE.SECTIONS;
+  const a = S[role] ?? S.build;
+  const b = S[next] ?? a;
+  for (const k of SECTION_KEYS) out[k] = lerp(a[k], b[k], cross);
+  return out;
+}
+
 export default class Scene3StarryNight extends SceneBase {
   constructor() {
-    super({ baseSpeed: CONFIG.IDLE_SPEED, speedGain: 0 });
+    super({ baseSpeed: PROFILE.SWIRL.IDLE, speedGain: 0 });
     this.renderScale = 1;
     this.toneMapped = false;
     this.realTime = 0;
     this.sdt = 0;
     // section state (blended stage presets) and the loudness tide
     this.state = { ...PROFILE.STAGES.calm };
-    this.swell = false;
-    this.speedTarget = CONFIG.IDLE_SPEED;
-    this.speedStage = CONFIG.IDLE_SPEED;
-    this.speedMult = CONFIG.IDLE_SPEED;
-    this.climax = 0;
-    this.glow = PROFILE.GLOW.BASE;
+    this.sec = sectionMix('hush', 'hush', 0);
+    this._mix = {};
+    this.x = 0;
+    this.speedTarget = PROFILE.SWIRL.IDLE;
+    this.speedStage = PROFILE.SWIRL.IDLE;
+    this.speedMult = PROFILE.SWIRL.IDLE;
+    this.climax = 0; // the weighted climax arc (first climax ~0.6, the main one 1)
+    this.glow = PROFILE.GLOW.IDLE;
+    this.warmth = 0;
+    this.keyBias = 0;
+    this.lower = 0;
+    this.upper = 0;
+    this.ending = 0;
+    this.role = 'hush';
     this.jumpId = -1;
+    this.score = null;
+    this.climaxes = [];
+    this.phrases = [];
+    this.phraseIndex = 0;
+    this.musicEnd = Infinity;
+    this.rippleAt = PROFILE.EVENTS.RIPPLE_LIVE;
+    this.lastRipple = -1e9;
+    // halos: per star (11 = the moon), the held level and its swell
+    this.haloTarget = new Float32Array(12);
+    this.halo = new Float32Array(12);
+    this.noteAt = -1e9;
+    this.waves = []; // phrase waves: realTime of their start
+    this.lastWave = -1e9;
+    this.sectionId = -1;
     // melody light and lift, mode colour, sway, pulses, bursts
-    this.height = 0.5;
+    this.melodyHeight = 0.5;
     this.tint = new THREE.Color(1, 1, 1);
     this.modeTint = new THREE.Color(1, 1, 1);
     this._color = new THREE.Color();
     this.tintAmount = 0;
     this.lift = 0;
-    this.sway = CONFIG.SWAY.MIN;
+    this.sway = PROFILE.LOWER.SWAY_MIN;
     this.pulses = new Float32Array(12);
     this.burstIndex = 0;
     this.lastStar = -1;
-    this.rippleBudget = 0;
     this.eventAmp = 1;
-    this.events = { blooms: 0, ripples: 0 };
+    this.events = { blooms: 0, ripples: 0, waves: 0 };
     this.map = { w: 1, h: 1, u0: 0, v0: 0 };
+    const P = PROFILE;
+    this.debugControls = [{ label: 'reactivity', min: 0.5, max: 3, step: 0.05, get: () => P.REACTIVITY, set: (v) => (P.REACTIVITY = v) }];
+    this._onKey = (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
+      if (e.key === '[' || e.key === ']') P.REACTIVITY = Math.round(Math.min(3, Math.max(0.5, P.REACTIVITY + (e.key === ']' ? 0.1 : -0.1))) * 100) / 100;
+    };
+    window.addEventListener('keydown', this._onKey);
   }
 
   // ------------------------------------------------------------- setup
@@ -310,7 +360,7 @@ export default class Scene3StarryNight extends SceneBase {
         uVisible: { value: C.STROKES.BASE },
         uOpacity: { value: C.STROKES.OPACITY },
         uBright: { value: 1 },
-        uSway: { value: C.SWAY.MIN },
+        uSway: { value: PROFILE.LOWER.SWAY_MIN },
         uTime: { value: 0 },
       },
       ...blend,
@@ -326,6 +376,7 @@ export default class Scene3StarryNight extends SceneBase {
       defines: { BURSTS: B.COUNT, BURST_STROKES: B.STROKES, BURST_LIFE: B.LIFE.toFixed(2) },
       uniforms: {
         ...paintUniforms(),
+        uFadeIn: { value: PROFILE.EVENTS.FADE_IN },
         uBursts: { value: Array.from({ length: B.COUNT }, () => new THREE.Vector4(0, 0, 0, -100)) },
         uBurstColors: { value: Array.from({ length: B.COUNT }, () => new THREE.Color()) },
         uBurstAmp: { value: new Float32Array(B.COUNT) },
@@ -368,11 +419,20 @@ export default class Scene3StarryNight extends SceneBase {
         uMap: { value: new THREE.Vector4(1, 1, 0, 0) },
         uCanvasTexel: { value: new THREE.Vector2() },
         uResolution: { value: new THREE.Vector2(1, 1) },
-        uTime: { value: 0 },
-        uTreble: { value: 0 },
-        uBass: { value: 0 },
-        uGlow: { value: PROFILE.GLOW.BASE },
-        uMoonGlow: { value: C.MOON_GLOW },
+        uClock: { value: 0 },
+        uUpper: { value: 0 },
+        uMoonBreath: { value: 0 },
+        uGlow: { value: PROFILE.GLOW.IDLE },
+        uMoonGlow: { value: PROFILE.GLOW.MOON },
+        uWarmth: { value: 0 },
+        uCool: { value: new THREE.Vector3(...PROFILE.WARMTH.COOL) },
+        uCoolAmount: { value: PROFILE.WARMTH.COOL_AMOUNT },
+        uCoolHalo: { value: new THREE.Color(PROFILE.WARMTH.COOL_HALO) },
+        uGoldHalo: { value: new THREE.Color(PROFILE.WARMTH.GOLD_HALO) },
+        uGrade: { value: PROFILE.WARMTH.GRADE },
+        uHighlight: { value: 0 },
+        uTwinkle: { value: new THREE.Vector2(0, PROFILE.UPPER.TWINKLE_RATE) },
+        uMoonLight: { value: new THREE.Vector2(0, PROFILE.GLOW.MOON_LIGHT[1]) },
         uClimax: { value: 0 },
         uTint: { value: new THREE.Color(1, 1, 1) },
         uTintAmount: { value: 0 },
@@ -461,7 +521,7 @@ export default class Scene3StarryNight extends SceneBase {
     super.setQuality(level);
     const q = CONFIG.QUALITY[level] ?? CONFIG.QUALITY[0];
     this.strokes.geometry.instanceCount = Math.floor(CONFIG.STROKES.MAX * q.strokes);
-    if (this.height > 1) this._sizeCanvas();
+    if (this.canvasA) this._sizeCanvas();
   }
 
   /** About one canvas texel per screen pixel of the visible painting, capped. */
@@ -492,18 +552,77 @@ export default class Scene3StarryNight extends SceneBase {
 
   // ------------------------------------------------------------ update
 
-  /**
-   * Flow speed for the anticipating drive: almost frozen at the very bottom,
-   * QUIET in soft passages, 1x in the middle; in the swell (entered at
-   * SWELL_ENTER, left below SWELL_EXIT) from 1x up to MAX.
-   */
-  _speedForDrive(drive) {
-    const S = PROFILE.SPEED;
-    if (!this.swell && drive >= S.SWELL_ENTER) this.swell = true;
-    else if (this.swell && drive < S.SWELL_EXIT) this.swell = false;
-    if (this.swell) return lerp(S.MID, S.MAX, clamp01((drive - S.SWELL_EXIT) / (1 - S.SWELL_EXIT)));
-    if (drive < S.DRIVE_QUIET) return lerp(S.FREEZE, S.QUIET, smoothstep(S.DRIVE_FREEZE, S.DRIVE_QUIET, drive));
-    return lerp(S.QUIET, S.MID, smoothstep(S.DRIVE_QUIET, S.DRIVE_MID, drive));
+  /** Drive -> intensity x (0..1), between the piece's level percentiles, with a soft knee. */
+  _intensity(drive) {
+    const L = PROFILE.LEVEL;
+    const [lo, hi] = this.score ? [this.quiet, this.loud] : L.LIVE;
+    const v = (drive - lo) / Math.max(1e-3, hi - lo);
+    const k = L.KNEE;
+    const knee = v >= k ? v : v <= -k ? 0 : (v + k) ** 2 / (4 * k);
+    return clamp01(knee) ** L.CURVE;
+  }
+
+  /** What the score knows ahead: level percentiles, the climaxes, phrase breaths, the end of the music. */
+  _prepareMap(map) {
+    this.score = map;
+    this.climaxes = [];
+    this.phrases = [];
+    this.musicEnd = Infinity;
+    if (!map) return;
+    const P = PROFILE;
+    const sc = SCORE_CONFIG.S_CURVE;
+    const s = Float32Array.from(map.level, (x) => {
+      const p = clamp01(x) ** sc;
+      return p / (p + (1 - clamp01(x)) ** sc);
+    }).sort();
+    const pct = (q) => s[Math.min(s.length - 1, Math.floor(q * (s.length - 1)))];
+    this.quiet = pct(P.LEVEL.QUIET);
+    this.loud = Math.max(this.quiet + 0.05, pct(P.LEVEL.LOUD));
+    const st = map.onsets.map((o) => o.strength).sort((a, b) => a - b);
+    this.rippleAt = st.length ? st[Math.floor((1 - P.EVENTS.RIPPLE_SHARE) * (st.length - 1))] : P.EVENTS.RIPPLE_LIVE;
+    this.climaxes = map.sections.filter((c) => c.role === 'climax').map((c, i) => ({ start: c.start, end: c.end, peak: c.peakAt ?? c.start, weight: P.CLIMAXES[i] ?? P.CLIMAXES[0] }));
+    // phrase breaths: dips of the (half-second smoothed) level below both neighbouring 2.5 s
+    const lv = map.level;
+    const r = map.rate;
+    const n = lv.length;
+    const w = Math.round(0.25 * r);
+    const sm = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let sum = 0;
+      let c = 0;
+      for (let k = Math.max(0, i - w); k <= Math.min(n - 1, i + w); k++, c++) sum += lv[k];
+      sm[i] = sum / c;
+    }
+    const span = Math.round(P.PHRASE.WINDOW * r);
+    for (let i = span; i < n - span; i++) {
+      if (sm[i] > sm[i - 1] || sm[i] > sm[i + 1]) continue;
+      let before = 0;
+      let after = 0;
+      for (let k = i - span; k < i; k++) before = Math.max(before, sm[k]);
+      for (let k = i + 1; k <= i + span; k++) after = Math.max(after, sm[k]);
+      const t = i / r;
+      if (Math.min(before, after) - sm[i] > P.PHRASE.DIP && t - (this.phrases.at(-1) ?? -1e9) > P.PHRASE.MIN_GAP) this.phrases.push(t);
+    }
+    let last = n - 1;
+    while (last > 0 && lv[last] < 0.05) last--;
+    this.musicEnd = last / r;
+  }
+
+  /** The weighted climax arc at playhead t: each climax ramps in, holds, decays. */
+  _arc(t) {
+    const A = PROFILE.ARC;
+    let v = 0;
+    for (const c of this.climaxes) {
+      const t0 = c.start - A.LEAD;
+      let e = 0;
+      if (t >= t0 && t < c.peak) e = smooth01((t - t0) / Math.max(1, c.peak - t0));
+      else if (t >= c.peak) {
+        const hold = c.peak + Math.min(A.HOLD, Math.max(0, c.end - c.peak));
+        e = t < hold ? 1 : Math.exp(-(t - hold) / A.DECAY);
+      }
+      v = Math.max(v, c.weight * e);
+    }
+    return v;
   }
 
   update(dt, audio) {
@@ -512,32 +631,55 @@ export default class Scene3StarryNight extends SceneBase {
     const perf = audio.perf;
     this.realTime += dt;
     const follow = (v, to, tau) => v + (to - v) * (1 - Math.exp(-dt / tau));
+    const ease = (v, to, up, down) => follow(v, to, to > v ? up : down);
     const presence = audio.presence;
     const drive = perf.drive;
     const jumped = perf.jumpId !== this.jumpId; // a seek: settle into the new moment at once
     this.jumpId = perf.jumpId;
+    const score = perf.source === 'score' ? perf.map : null;
+    if (score !== this.score) this._prepareMap(score);
+    const R = P.REACTIVITY;
+    const t = perf.t;
 
     // --- section state: the current stage, blending into the next one ahead of the change
+    const cross = perf.next ? smoothstep(SCORE_CONFIG.LOOKAHEAD, 0, perf.timeToNext) : 0;
+    // the opening rises out of the hush; the last bars settle into the fade
+    const opening = score ? 1 - smooth01(t / P.OPENING) : 0;
+    this.ending = score ? smooth01((t - (this.musicEnd - P.ENDING.TIME)) / P.ENDING.TIME) : 0;
     const now = P.STAGES[perf.stage] ?? P.STAGES.calm;
     const next = perf.next ? P.STAGES[perf.next.stage] ?? now : now;
-    const cross = perf.next ? smoothstep(SCORE_CONFIG.LOOKAHEAD, 0, perf.timeToNext) : 0;
     for (const k of STAGE_KEYS) {
       let target = lerp(now[k], next[k], cross);
-      if (perf.ending && P.ENDING[k] !== undefined) target *= P.ENDING[k];
+      if (P.ENDING[k] !== undefined) target *= lerp(1, P.ENDING[k], Math.max(this.ending, perf.ending ? 1 : 0));
       if (presence < 1) target = lerp(P.STAGES.building[k], target, presence); // idle: neutral
       this.state[k] = jumped ? target : follow(this.state[k], target, P.STAGE_BLEND / 3);
     }
     const st8 = this.state;
+    // the energy state (hush ... fade) of this section and the next
+    const role = perf.section?.role ?? ROLE_OF_STAGE[perf.stage] ?? 'build';
+    this.role = this.ending > 0.5 ? 'fade' : opening > 0.5 ? 'hush' : role;
+    const mix = sectionMix(role, perf.next?.role ?? role, cross, this._mix);
+    for (const k of SECTION_KEYS) {
+      let target = lerp(lerp(mix[k], P.SECTIONS.hush[k], opening), P.SECTIONS.fade[k], this.ending);
+      if (presence < 1) target = lerp(P.SECTIONS.build[k], target, presence);
+      this.sec[k] = jumped ? target : follow(this.sec[k], target, P.SECTION_BLEND / 3);
+    }
+    const sec = this.sec;
+    const x = (this.x = this._intensity(drive));
 
-    // --- climax: the score's envelope already rises during the build
-    this.climax = jumped ? perf.climax : follow(this.climax, perf.climax * presence, 0.35);
+    // --- the climax arc (weighted: the main climax is the biggest), the low strings and the violins
+    const arc = (score ? this._arc(t) : perf.climax * P.ARC.LIVE) * (1 - this.ending) * presence;
+    this.climax = jumped ? arc : follow(this.climax, arc, 0.35);
+    this.lower = ease(this.lower, audio.lower * presence, ...P.LOWER.SMOOTH);
+    this.upper = ease(this.upper, audio.upper * presence, ...P.UPPER.SMOOTH);
 
-    // --- the tide: drive -> speed, scaled by the section, two smoothing stages so it never jerks
-    const musical = this._speedForDrive(drive) * st8.speed * (1 + (P.CLIMAX.SPEED - 1) * this.climax);
-    this.speedTarget = lerp(C.IDLE_SPEED, Math.min(musical, P.SPEED.MAX), presence);
+    // --- the tide: loudness and its momentum -> flow speed, two smoothing stages so it never jerks
+    const S = P.SWIRL;
+    const musical = softLimit(react(S.RANGE, x, R) * sec.MOVE * (1 + S.MOMENTUM * perf.rise) * (1 + S.CLIMAX * this.climax), S.LIMIT);
+    this.speedTarget = lerp(S.IDLE * lerp(1, P.SECTIONS.fade.MOVE, this.ending), musical, presence);
     if (jumped) this.speedStage = this.speedMult = this.speedTarget;
-    this.speedStage = follow(this.speedStage, this.speedTarget, P.SPEED.SMOOTHING / 2);
-    this.speedMult = follow(this.speedMult, this.speedStage, P.SPEED.SMOOTHING / 2);
+    this.speedStage = ease(this.speedStage, this.speedTarget, S.ATTACK / 2, S.RELEASE / 2);
+    this.speedMult = ease(this.speedMult, this.speedStage, S.ATTACK / 2, S.RELEASE / 2);
     this.speed = this.speedMult;
     this.sdt = dt * this.speedMult;
     this.time += this.sdt;
@@ -547,49 +689,90 @@ export default class Scene3StarryNight extends SceneBase {
     const expTarget = lerp(1, lerp(X.QUIET, X.LOUD, Math.pow(drive, X.CURVE)) * st8.exposure * lerp(1, X.CLIMAX, this.climax), presence);
     this.exposure = jumped ? expTarget : follow(this.exposure, expTarget, expTarget > this.exposure ? X.ATTACK : X.RELEASE);
 
-    // --- light: stars dim in the quietest passages and bloom at the climax
-    const dim = lerp(P.GLOW.DIM, P.GLOW.BASE, smoothstep(P.SPEED.DRIVE_FREEZE, P.SPEED.DRIVE_MID, drive));
-    const glowTarget = lerp(P.GLOW.BASE, dim * st8.glow, presence) * lerp(1, P.GLOW.CLIMAX, this.climax);
-    this.glow = jumped ? glowTarget : follow(this.glow, glowTarget, P.GLOW.SMOOTHING);
+    // --- light: stars dim in the hush and bloom at the climax; the violins brighten the halos
+    const G = P.GLOW;
+    const glowMusic = softLimit(react(G.RANGE, x, R) * sec.GLOW * (1 + G.CLIMAX * this.climax) * (1 + G.UPPER * this.upper), G.LIMIT);
+    const glowTarget = lerp(G.IDLE * lerp(1, P.SECTIONS.fade.GLOW, this.ending), glowMusic, presence);
+    const settle = (release) => lerp(release, P.ENDING.RELEASE, this.ending); // the last bars let go quicker
+    this.glow = jumped ? glowTarget : ease(this.glow, glowTarget, G.ATTACK, settle(G.RELEASE));
+
+    // --- cool to gold: the climax arc (fuller when loud), the section, the key
+    const W = P.WARMTH;
+    const keyTarget = W.KEYS[perf.key.mode] ?? 0;
+    this.keyBias = jumped ? keyTarget : follow(this.keyBias, keyTarget, W.KEYS.TIME);
+    const warmTarget = clamp01(this.climax * lerp(W.LEVEL_FLOOR, 1, x) + (sec.WARMTH * x + this.keyBias) * presence * (1 - this.ending));
+    this.warmth = jumped ? warmTarget : ease(this.warmth, warmTarget, W.ATTACK, settle(W.RELEASE));
 
     // --- melody: height lifts the spiral and the moon and colours the light
     const M = P.MELODY;
     const clear = smoothstep(M.MIN_CONF, M.MIN_CONF + 0.3, perf.heightConf);
     const heightTarget = lerp(0.5, perf.height, clear * presence);
-    this.height = jumped ? heightTarget : follow(this.height, heightTarget, heightTarget > this.height ? M.ATTACK : M.RELEASE);
-    this.lift = (this.height - 0.5) * M.LIFT;
+    this.melodyHeight = jumped ? heightTarget : follow(this.melodyHeight, heightTarget, heightTarget > this.melodyHeight ? M.ATTACK : M.RELEASE);
+    this.lift = (this.melodyHeight - 0.5) * M.LIFT;
     const modeColor = P.MODE[perf.key.mode];
     if (modeColor) this.modeTint.lerp(this._color.set(modeColor), jumped ? 1 : 1 - Math.exp(-dt / P.MODE.SMOOTHING));
-    heightColor(this.height, this._color).lerp(this.modeTint, P.MODE.AMOUNT);
+    heightColor(this.melodyHeight, this._color).lerp(this.modeTint, P.MODE.AMOUNT);
     this.tint.lerp(this._color, jumped ? 1 : 1 - Math.exp(-dt / 0.4));
     this.tintAmount = (P.TINT.BASE + P.TINT.MELODY * clear) * presence;
 
-    // --- the spirals: strength by section, breathing with the bass
-    const breathe = 1 + C.BASS.SPIRAL * audio.bass * presence;
+    // --- the spirals: strength by section and loudness, the great spiral breathing with the low strings
+    const L = P.LOWER;
+    const breathe = 1 + L.SPIRAL * this.lower;
+    const turn = react(S.SPIRAL, x, R);
     const fu = this.flowMat.uniforms;
-    C.SPIRALS.forEach((s, i) => fu.uSpirals.value[i].set(s.u * this.paintAspect, s.v + this.lift, s.r * breathe, s.strength * st8.spiral));
+    C.SPIRALS.forEach((s, i) => fu.uSpirals.value[i].set(s.u * this.paintAspect, s.v + this.lift, s.r * (i === 0 ? breathe : Math.sqrt(breathe)), s.strength * st8.spiral * turn));
     fu.uStars.value[11].set(this.stars[11].x, this.stars[11].y + this.lift, this.stars[11].z);
     fu.uTime.value = this.time;
 
-    // --- energy sways the cypress
-    this.sway = follow(this.sway, C.SWAY.MIN + C.SWAY.GAIN * audio.energy * presence, C.SWAY.SMOOTHING);
+    // --- the low strings sway the cypress
+    this.sway = L.SWAY_MIN + L.SWAY * this.lower;
 
-    // --- notes: melody notes bloom a star, the accompaniment ripples the wind
+    // --- notes: melody notes swell a star's halo (and bloom soft strokes), strong bow attacks ripple the wind
     const E = P.EVENTS;
     this.eventAmp = st8.events * lerp(E.QUIET_AMP, 1, Math.sqrt(drive));
-    this.rippleBudget = Math.min(E.MAX_PER_SECOND, this.rippleBudget + dt * E.MAX_PER_SECOND);
+    if (jumped) this.lastRipple = -1e9;
     if (presence > 0.3 && drive >= E.MIN_DRIVE) {
       for (const o of perf.onsets) {
         // land exactly on the note: the bloom is born at the onset time, not at this frame
         const birth = this.realTime - Math.max(0, Math.min(0.1, perf.t - o.t));
         if (o.melody) this._melodyBloom(o, birth);
-        else if (this.rippleBudget >= 1) {
-          this.rippleBudget -= 1;
+        if (o.strength >= this.rippleAt && o.t - this.lastRipple >= E.RIPPLE_GAP) {
+          this.lastRipple = o.t;
           this._ripple(o, birth);
         }
       }
     }
-    for (let i = 0; i < 12; i++) this.pulses[i] *= Math.exp(-dt * C.BURSTS.PULSE_DECAY);
+    // halos: the sung star holds while the melody sustains, the others fade
+    const H = P.HALO;
+    const sustained = perf.heightConf >= M.MIN_CONF && this.realTime - this.noteAt < 2 * H.HOLD;
+    for (let i = 0; i < 12; i++) {
+      this.haloTarget[i] *= Math.exp(-dt / (i === this.lastStar && sustained ? H.HOLD : H.DECAY));
+      this.halo[i] = jumped ? 0 : ease(this.halo[i], this.haloTarget[i], H.ATTACK, 0.3);
+    }
+    // phrase breaths: a wave of light from the moon across the stars
+    const PH = P.PHRASE;
+    if (score) {
+      if (jumped) this.phraseIndex = this.phrases.findIndex((p) => p > t);
+      if (this.phraseIndex < 0) this.phraseIndex = this.phrases.length;
+      while (this.phraseIndex < this.phrases.length && this.phrases[this.phraseIndex] <= t) {
+        if (presence > 0.3 && t - this.phrases[this.phraseIndex] < 1) this._wave(this.realTime - (t - this.phrases[this.phraseIndex]));
+        this.phraseIndex++;
+      }
+    } else if (perf.sectionId !== this.sectionId && presence > 0.3 && this.realTime - this.lastWave > PH.MIN_GAP) this._wave(this.realTime);
+    this.sectionId = perf.sectionId;
+    if (jumped) this.waves.length = 0;
+    const moon = this.stars[11];
+    const waveAmp = PH.AMP * lerp(0.5, 1, x) * presence;
+    for (let i = 0; i < 12; i++) {
+      const d = Math.hypot(this.stars[i].x - moon.x, this.stars[i].y - moon.y);
+      let wv = 0;
+      for (const w0 of this.waves) {
+        const u = (this.realTime - w0 - d / PH.SPEED) / PH.WIDTH;
+        wv += Math.exp(-u * u);
+      }
+      this.pulses[i] = Math.min(H.MAX, this.halo[i] + waveAmp * wv);
+    }
+    while (this.waves.length && this.realTime - this.waves[0] > 2 / PH.SPEED + 3 * PH.WIDTH) this.waves.shift();
 
     // --- pointer: a finger in wet paint
     const PA = this.paintAspect;
@@ -618,28 +801,45 @@ export default class Scene3StarryNight extends SceneBase {
     cu.uDt.value = this.sdt;
     const sk = this.strokeMat.uniforms;
     sk.uVisible.value = lerp(st8.strokes, 1, this.climax * P.CLIMAX.STROKE_BOOST);
-    sk.uBright.value = st8.bright * lerp(1, P.CLIMAX.BRIGHT, this.climax) * (1 + M.BRIGHTEN * (this.height - 0.5) * 2 * clear);
+    sk.uBright.value = st8.bright * lerp(1, P.CLIMAX.BRIGHT, this.climax) * (1 + M.BRIGHTEN * (this.melodyHeight - 0.5) * 2 * clear);
     sk.uSway.value = this.sway;
     sk.uTime.value = this.time;
-    this.burstMat.uniforms.uRealTime.value = this.realTime;
+    const bu = this.burstMat.uniforms;
+    bu.uRealTime.value = this.realTime;
+    bu.uFadeIn.value = E.FADE_IN;
     const f = this.finalMat.uniforms;
-    f.uTime.value = this.time;
-    f.uTreble.value = audio.treble * presence;
-    f.uBass.value = audio.bass * presence;
+    f.uClock.value = this.realTime;
+    f.uUpper.value = this.upper;
+    f.uMoonBreath.value = L.MOON * this.lower;
     f.uGlow.value = this.glow;
-    f.uMoonGlow.value = C.MOON_GLOW * this.glow * (0.8 + 0.4 * audio.bass * presence);
+    f.uMoonGlow.value = G.MOON * softLimit(this.glow, G.MOON_LIMIT) * (1 + G.MOON_SWELL * this.warmth);
+    f.uMoonLight.value.set(G.MOON_LIGHT[0] * this.glow * (0.3 + 0.7 * this.warmth), G.MOON_LIGHT[1]);
     f.uClimax.value = this.climax;
+    f.uWarmth.value = this.warmth;
+    f.uCool.value.set(...W.COOL);
+    f.uCoolAmount.value = W.COOL_AMOUNT;
+    f.uGrade.value = W.GRADE;
+    f.uHighlight.value = P.UPPER.HIGHLIGHT * this.upper;
+    f.uTwinkle.value.set(P.UPPER.TWINKLE * this.upper, P.UPPER.TWINKLE_RATE);
     f.uTint.value.copy(this.tint);
     f.uTintAmount.value = this.tintAmount;
     f.uPulse.value.set(this.pulses);
     f.uMoon.value.set(this.stars[11].x, this.stars[11].y + this.lift);
   }
 
+  /** A phrase begins: a wave of light from the moon across the stars (rate-limited). */
+  _wave(start) {
+    if (start - this.lastWave < PROFILE.PHRASE.MIN_GAP) return;
+    this.lastWave = start;
+    this.waves.push(start);
+    this.events.waves++;
+  }
+
   _nextBurst() {
     return this.burstIndex++ % CONFIG.BURSTS.COUNT;
   }
 
-  /** A melody note: bright strokes and a halo around the star at the note's height. */
+  /** A melody note: soft bright strokes and a swelling halo around the star at the note's height. */
   _melodyBloom(o, birth) {
     const E = PROFILE.EVENTS;
     const amp = this.eventAmp;
@@ -663,12 +863,13 @@ export default class Scene3StarryNight extends SceneBase {
     // warm yellow-white, coloured by the note's own height (high notes pale, low notes blue-violet)
     heightColor(o.height, this._color);
     u.uBurstColors.value[slot].setRGB(1.0, 0.86, 0.52).lerp(this._color, 0.55).multiplyScalar(rand(0.9, 1.1));
-    u.uBurstAmp.value[slot] = Math.min(1, 0.3 + 0.55 * amp * (0.6 + 0.4 * o.strength));
-    this.pulses[i] = Math.max(this.pulses[i], lerp(...E.MELODY_PULSE, o.strength) * amp);
+    u.uBurstAmp.value[slot] = E.MELODY_AMP * Math.min(1, 0.3 + 0.55 * amp * (0.6 + 0.4 * o.strength));
+    this.haloTarget[i] = Math.max(this.haloTarget[i], lerp(...E.MELODY_PULSE, o.strength) * amp);
+    this.noteAt = this.realTime;
     this.events.blooms++;
   }
 
-  /** An accompaniment note: a faint ripple of sky strokes somewhere along the wind. */
+  /** A strong bow attack: a faint ripple of sky strokes somewhere along the wind. */
   _ripple(o, birth) {
     const E = PROFILE.EVENTS;
     const slot = this._nextBurst();
@@ -710,18 +911,27 @@ export default class Scene3StarryNight extends SceneBase {
   /** Live values for the debug overlay (D). */
   get debug() {
     const hex = '#' + this.tint.getHexString(THREE.SRGBColorSpace);
-    const st = this.state;
+    const warm = '#' + this._color.copy(this.finalMat.uniforms.uCoolHalo.value).lerp(this.finalMat.uniforms.uGoldHalo.value, this.warmth).getHexString(THREE.SRGBColorSpace);
+    const a = this.arcState;
     return {
-      'speed ×': `${this.speedMult.toFixed(2)}  → ${this.speedTarget.toFixed(2)}${this.swell ? '  SWELL' : ''}`,
-      state: `speed ${st.speed.toFixed(2)} · glow ${st.glow.toFixed(2)} · spiral ${st.spiral.toFixed(2)}`,
-      climax: `${this.climax.toFixed(2)} · exposure ${this.exposure.toFixed(2)}`,
-      light: { swatch: hex, text: `height ${this.height.toFixed(2)} · tint ${this.tintAmount.toFixed(2)}` },
-      events: `${this.events.blooms} blooms · ${this.events.ripples} ripples`,
+      level: `x ${a.x.toFixed(2)} · reactivity ${a.reactivity.toFixed(2)} ([ ]) · low strings ${this.lower.toFixed(2)} · violins ${this.upper.toFixed(2)}`,
+      section: `${a.section} · move ${this.sec.MOVE.toFixed(2)} · glow ×${this.sec.GLOW.toFixed(2)}${this.ending > 0 ? ` · ending ${this.ending.toFixed(2)}` : ''}`,
+      warmth: { swatch: warm, text: `${a.warmth.toFixed(2)} · climax arc ${this.climax.toFixed(2)} · key ${this.keyBias >= 0 ? '+' : ''}${this.keyBias.toFixed(2)}` },
+      'swirl speed': `×${this.speedMult.toFixed(2)}  → ${this.speedTarget.toFixed(2)}`,
+      glow: `${this.glow.toFixed(2)} · moon ${this.finalMat.uniforms.uMoonGlow.value.toFixed(2)} · exposure ${this.exposure.toFixed(2)}`,
+      light: { swatch: hex, text: `height ${this.melodyHeight.toFixed(2)} · tint ${this.tintAmount.toFixed(2)}` },
+      events: `${this.events.blooms} blooms · ${this.events.ripples} ripples · ${this.events.waves} phrase waves`,
       strokes: `${Math.round(this.strokes.geometry.instanceCount * this.strokeMat.uniforms.uVisible.value)}`,
     };
   }
 
+  /** The breathing state, for verify (--festivo) and the debug overlay. */
+  get arcState() {
+    return { x: this.x, speed: this.speedMult, glow: this.glow, warmth: this.warmth, climax: this.climax, lower: this.lower, upper: this.upper, ending: this.ending, section: this.role, reactivity: PROFILE.REACTIVITY, waves: this.events.waves, halo: Math.max(...this.pulses) };
+  }
+
   dispose() {
+    window.removeEventListener('keydown', this._onKey);
     this.tune?.dispose();
     for (const t of [this.maskRT, this.flowRT, this.stateA, this.stateB, this.canvasA, this.canvasB, this.refRT]) t?.dispose();
     for (const m of [this.flowMat, this.stateMat, this.canvasMat, this.copyMat, this.finalMat, this.strokeMat, this.burstMat]) m?.dispose();
