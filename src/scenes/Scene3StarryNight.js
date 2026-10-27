@@ -6,7 +6,7 @@ import { createTarget } from '../gl/targets.js';
 import { pointer } from '../input.js';
 import { createTunePanel, configParams, bindConfig } from '../tune.js';
 import { SCORE_CONFIG } from '../scoreMap.js';
-import { PROFILE, TUNE } from './profiles/standchen.js';
+import { PROFILE, TUNE } from './profiles/andanteFestivo.js';
 
 import noiseGLSL from '../shaders/common/noise.glsl?raw';
 import paintGLSL from '../shaders/starry/paint.glsl?raw';
@@ -22,9 +22,11 @@ import canvasFrag from '../shaders/starry/canvas.frag?raw';
 import finalFrag from '../shaders/starry/final.frag?raw';
 
 /**
- * Scene 2: The Starry Night as a living oil painting, tuned for the
- * Schubert/Liszt "Ständchen" (solo piano: very quiet intro, one big climax,
- * long fade-out).
+ * Scene 3: The Starry Night as a living oil painting, performing Sibelius'
+ * "Andante Festivo" (string orchestra: noble legato lines that keep
+ * building, a first climax around 1:34-2:03, a radiant final climax).
+ * (It first performed the Ständchen as scene 2; the user swapped the visuals
+ * of scenes 2 and 3, keeping the pieces on their keys.)
  *
  * Van Gogh's painting (public domain, /public/textures/starry-night.jpg) is
  * the colour and composition guide, never shown directly:
@@ -40,11 +42,11 @@ import finalFrag from '../shaders/starry/final.frag?raw';
  *   4. The final pass adds impasto light, canvas weave, glows, the note tint
  *      and a vignette (final.frag).
  *
- * The music arrives through audio.perf (scoreMap.js): with the Ständchen
+ * The music arrives through audio.perf (scoreMap.js): with the Andante Festivo
  * analysis loaded it knows the sections, the climax ahead and every note;
  * with any other source it runs on the live analyser. How the piece is
  * painted (section states, melody light and lift, star blooms on melody
- * notes, ripples on the accompaniment) lives in profiles/standchen.js and is
+ * notes, ripples on the accompaniment) lives in profiles/andanteFestivo.js and is
  * tunable live with T. Bass makes the moon and the spiral breathe, treble
  * twinkles, energy sways the cypress.
  */
@@ -155,7 +157,7 @@ function heightColor(h, out) {
 }
 const STAGE_KEYS = Object.keys(PROFILE.STAGES.calm);
 
-export default class Scene2StarryNight extends SceneBase {
+export default class Scene3StarryNight extends SceneBase {
   constructor() {
     super({ baseSpeed: CONFIG.IDLE_SPEED, speedGain: 0 });
     this.renderScale = 1;
@@ -382,7 +384,7 @@ export default class Scene2StarryNight extends SceneBase {
 
     await this.pass.compile(renderer, [this.flowMat, this.stateMat, this.canvasMat, this.copyMat, this.finalMat]);
     await precompile(renderer, this.paintScene, this.camera);
-    this.tune = createTunePanel({ title: 'Starry Night · Ständchen', storageKey: 'resonance.tune.starry', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
+    this.tune = createTunePanel({ title: 'Starry Night · Andante Festivo', storageKey: 'resonance.tune.starry', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
   }
 
   /** The reference painting, or a procedural stand-in when the image is missing. */

@@ -6,7 +6,7 @@ A five-scene WebGL music visualizer (Vite, vanilla ES modules, Three.js, custom 
 
 - **Never commit audio.** Pieces live in `public/Music/` (gitignored by extension: mp3/wav/flac/ogg/m4a/aac/webm). Don't move, rename or re-encode them; `src/pieces.js` matches files by leading number / name.
 - `public/analysis/*.json` is derived data and fine to commit. Regenerate it with `npm run analyze`; that **keeps the hand-edited `manual` block** of each JSON.
-- Commit or push only when the user asks. The user has uncommitted work of their own in `Scene1Fluid.js`, `Scene2StarryNight.js` and the starry/fluid shaders: build on it, don't revert it.
+- Commit or push only when the user asks. Build on the user's own work in the scenes and shaders; don't revert it.
 - Keep every tuning constant in one config object per scene/profile, with the important ones exposed as live sliders (T panel).
 - Match the existing style: long explanatory header comment per file, short "why" comments, `CONFIG`/`PROFILE` objects in CAPS at the top.
 - Verify visual changes by looking (see "Verifying"), not only by reading numbers.
@@ -28,8 +28,10 @@ npm run build                       # GitHub Pages build (base /resonance-visual
 | Key | Scene | Piece (file in `public/Music/`) | Profile |
 | --- | --- | --- | --- |
 | 1 | Liquid Paint (fluid pour) | Roman, *Drottningholmsmusiken* (`1. …`), ~7:14, ~56 bpm | `profiles/drottningholm.js` |
-| 2 | Starry Night | Schubert/Liszt, *Ständchen* (`2. …`, filename is NFD Unicode), ~6:05, ~50 bpm | `profiles/standchen.js` |
-| 3 | Aurora | Sibelius, *Andante Festivo* (`3. …`), ~4:05 | `profiles/andanteFestivo.js` |
+| 2 | Aurora (`Scene2Aurora.js`) | Schubert/Liszt, *Ständchen* (`2. …`, filename is NFD Unicode), ~6:05, ~50 bpm | `profiles/standchen.js` |
+| 3 | Starry Night (`Scene3StarryNight.js`) | Sibelius, *Andante Festivo* (`3. …`), ~4:05 | `profiles/andanteFestivo.js` |
+
+**Swapped 2026-10-27 (user):** the visuals of keys 2 and 3 traded places; the pieces stayed on their keys. A profile is shaped for its *scene* (the Starry-shaped profile is now `andanteFestivo.js`, the Aurora-shaped one `standchen.js`); their numbers were carried over from the old piece and only the notes were rewritten, so both may want retuning by ear. The T-panel storage keys (`resonance.tune.starry` / `.aurora`) follow the scene.
 | 4 | Stockholm (silent film) | Mozart, *Eine kleine Nachtmusik* **I. Allegro only** (`4. A1-Allegro.mp3`, confirmed by user, no Romanze) | **not done yet** |
 | 5 | Galaxy | `5. quentingaming-interstellar-580133.mp3`: an Interstellar-style track, **not** Zimmer's *Day One*; user said use it as-is | `profiles/interstellar.js` |
 
@@ -81,8 +83,12 @@ Every profile has `STAGES` (multipliers per stage, cross-faded into the next sec
 
 ## Audio → visual mappings (per profile)
 
-- **Scene 2 / Ständchen:** drive → flow speed (FREEZE 0.04 … MAX 2.4, swell hysteresis 0.8/0.62); exposure 0.5 (quiet) → 1.0, ×1.1 at the climax; melody height → spiral/moon lift (0.07) and light colour (violet → cobalt → sky → pale yellow → white); minor/major tints violet/gold; melody notes bloom a star at the note's height (never the same star twice, soft painted halo); other onsets make faint sky-blue ripples (≤ 9/s); the climax opens the sky (all strokes, glow ×1.9). Burst strokes are spread over a disc, not a ring (hard rings looked like UI).
+- **Scene 3 / Starry Night (now Andante Festivo; mappings below were written for the Ständchen):** drive → flow speed (FREEZE 0.04 … MAX 2.4, swell hysteresis 0.8/0.62); exposure 0.5 (quiet) → 1.0, ×1.1 at the climax; melody height → spiral/moon lift (0.07) and light colour (violet → cobalt → sky → pale yellow → white); minor/major tints violet/gold; melody notes bloom a star at the note's height (never the same star twice, soft painted halo); other onsets make faint sky-blue ripples (≤ 9/s); the climax opens the sky (all strokes, glow ×1.9). Burst strokes are spread over a disc, not a ring (hard rings looked like UI).
 - **Scene 1 / Drottningholm:** a tide clock (rise 1.2 s, fall 4 s, curve 1.25); stages scale speed, pours, swirl, paint and bloom size (hush: speed ×0.55, pours ×0.3); score onsets bloom notes at their own pitch (≤ 7/s); key change → colour burst (D azure, F# violet-blue, A gold, B purple, E white) and a slow hue turn; the last climax section → expansive pours from below; exposure 0.62 → 1.0. Live input keeps the scene's original behaviour (but does get the journey, see below).
+
+- **Scene 5 / Interstellar:** `build` (drive^1.4, attack 1 s / release 4 s) → rotation (0.06 → 1.6), core glow, bloom, exposure (0.6 → 1.05), star density (40 → 100%); camera pull-back ×1.75 and +0.35 rad rise at full `open` = max(stage.pull × build, climax); score beats → shockwave rings (none below drive 0.25).
+- **Scene 2 / Aurora (now Ständchen; mappings below were written for the Andante Festivo):** `build` (drive^1.6) → curtain height/width/coverage/brightness/fold via new aurora uniforms (`uHeight uWidth uCover uFold uBright uWarm`); the climax warms green toward gold; accented onsets → a soft shimmer and colour surge. The climax was blown out to white; it was capped (BRIGHT FULL 0.85 / CLIMAX 0.25, COVER ≤ ~0.9, EXPOSURE CLIMAX 0.05). **Verified with the Ständchen (2026-10-27): its climax (~4:51) still washes half the frame to white-grey.** Lowering the profile's BRIGHT/COVER/HEIGHT/EXPOSURE barely changed it, so the cause is inside the scene/shader (live energy and bass gain on the curtains, bloom), not the profile. Not fixed yet.
+- **Scene 4 / Mozart:** still on the old live mappings (energy → speed, bass → flicker, treble → grain, beat → exposure flash). To do: motion locked to the score's beats, accents flicker the exposure, contrast and grain follow quick vs lyrical passages.
 
 ### Scene 1 journey (light swirls → deep blue / purple swirls)
 
@@ -99,8 +105,8 @@ A slow value `journey` (0 = start, 1 = end) gives the 7:14 piece a long-term arc
 
 ## Controls
 
-`1`–`5` scenes · `P` play the current scene's piece (or play/pause it) · `Space` play/pause · `F` fullscreen · `H` hide UI · `D` debug overlay + score timeline (click the timeline or a section button to seek; **Shift+0…9** jumps to 0 %…90 % of the piece) · `T` tuning sliders for the current scene/profile · drag (Scene 1) pours paint · mouse (Scenes 2, 5) parallax / pushes strokes.
+`1`–`5` scenes (1 Liquid Paint, 2 Aurora, 3 Starry Night, 4 Stockholm, 5 Galaxy) · `P` play the current scene's piece (or play/pause it) · `Space` play/pause · `F` fullscreen · `H` hide UI · `D` debug overlay + score timeline (click the timeline or a section button to seek; **Shift+0…9** jumps to 0 %…90 % of the piece) · `T` tuning sliders for the current scene/profile · drag (Scene 1) pours paint · mouse (Scenes 3, 5) parallax / pushes strokes.
 
 ## Status (2026-10-27)
 
-Done and verified (60 fps, 0 console errors, build starts before the loudest point): the pipeline, the score follower, the debug timeline, Scene 2, Scene 1 and Scene 5. Scene 1's journey (dark background, travelling swirl colours) is verified with `--journey`; awaiting the user's feedback. Scene 3 is applied but its climax fix needs a re-run of `npm run verify -- andante-festivo`. Scene 4 is not started. README.md has not been updated for the new features yet.
+Done and verified (60 fps, 0 console errors, build starts before the loudest point): the pipeline, the score follower, the debug timeline, Scene 1 and Scene 5; after the swap, Scene 3 (Starry Night / Andante Festivo: climaxes bright, not blown out) and Scene 2 (Aurora / Ständchen) apart from its washed-out climax. Scene 1's journey (dark background, travelling swirl colours) is verified with `--journey`; awaiting the user's feedback. Scene 4 is not started. README.md has the swapped scene order but not the score-following / journey features yet.

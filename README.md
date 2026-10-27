@@ -11,8 +11,8 @@ A five-scene WebGL music visualizer built with Vite, vanilla JavaScript (ES modu
 | Key | Scene |
 | --- | --- |
 | `1` | **Liquid Paint**: a GPU fluid simulation rendered as a blue/teal acrylic pour |
-| `2` | **Starry Night**: a living, brush-stroked painting inspired by Van Gogh (1889, public domain) |
-| `3` | **Aurora**: aurora curtains over a fjord with snowy mountains and a mirrored reflection |
+| `2` | **Aurora**: aurora curtains over a fjord with snowy mountains and a mirrored reflection |
+| `3` | **Starry Night**: a living, brush-stroked painting inspired by Van Gogh (1889, public domain) |
 | `4` | **Stockholm**: a 1930s city square as flickering black-and-white silent film |
 | `5` | **Galaxy**: a ~240k-particle spiral galaxy in a nebula-filled sky |
 
@@ -44,7 +44,7 @@ Microphone input needs a secure context, so use `localhost` or HTTPS. GitHub Pag
 - **D**: debug overlay for live tuning. It shows pitch height (with its frequency, peak-vs-centroid confidence and adaptive range), loudness, the dominant note with 12-bin chroma, and the scene's values. For Scene 1 that includes a swatch of the colour new paint is getting. It stays visible when the rest of the UI hides.
 - **Space**: play or pause the loaded file
 - **Drag on the canvas** (Scene 1): pour paint with the mouse or a finger
-- **Move the mouse** (Scene 2): push the brush strokes aside
+- **Move the mouse** (Scene 3): push the brush strokes aside
 - **Move the mouse** (Scene 5): camera parallax
 
 The UI auto-hides after 3 s without mouse movement and comes back when you move the mouse.
@@ -92,8 +92,8 @@ The speed multiplier is lerped toward its target, so motion never jerks (`src/sc
 | Scene | energy | bass | mid | treble | beat |
 | --- | --- | --- | --- | --- | --- |
 | 1 Liquid Paint | via a slow "drive" (loudness + note density): simulation speed, pour rate and force; loudness also sets paint intensity and saturation | continuo pours from below | vorticity (curl) strength | tiny bright specks, more cells, glints | extra pours once the music has built up; each **note** leaves a curling flourish; **pitch height** colours all paint |
-| 2 Starry Night | adaptive `level` sets flow speed (near-freeze → 2.5× swell), climax opens the sky; cypress sway | moon and spiral breathe | — | star twinkle, sparkles | piano **onsets** fire stroke bursts and a halo pulse; the held **note** tints the sky; **pitch height** lifts spiral and moon |
-| 3 Aurora | wave speed and brightness | curtains swell and flare upward | fold frequency | fine vertical rays, star twinkle | green-to-pink colour surge |
+| 2 Aurora | wave speed and brightness | curtains swell and flare upward | fold frequency | fine vertical rays, star twinkle | green-to-pink colour surge |
+| 3 Starry Night | adaptive `level` sets flow speed (near-freeze → 2.5× swell), climax opens the sky; cypress sway | moon and spiral breathe | — | star twinkle, sparkles | **onsets** fire stroke bursts and a halo pulse; the held **note** tints the sky; **pitch height** lifts spiral and moon |
 | 4 Stockholm | speed of trams, cars and pedestrians | light flicker, camera shake | — | grain, dust, scratches | exposure flash |
 | 5 Galaxy | rotation speed, camera drift | core glow, arm expansion | ripples through the particles | star sparkle | shockwave rings travelling outward |
 
@@ -151,7 +151,17 @@ Tune it with `IDLE_SPEED`, `MUSIC_SPEED`, `DRIVE_RISE`, `DRIVE_FALL`, `DRIVE_FRO
 - **Ornaments**: every articulated note leaves a small curling flourish along a travelling "phrase line", at a height that follows the pitch height and in that height's colour.
 - **Continuo**: the bass line pours in from the lower part of the canvas.
 
-### 2 · Starry Night (`Scene2StarryNight.js`, `shaders/starry/`)
+### 2 · Aurora (`Scene2Aurora.js`, `shaders/aurora/`)
+
+The curtains are thin folded sheets standing on a map. Their shapes live in a per-frame 4096×3 lookup texture (`curtains.frag`). `aurora.frag` marches upward through horizontal slices; every slice re-samples the same footprint, which stacks into vertical sheets in perspective, with a pink lower fringe, a green body and a violet crown.
+
+Supporting passes:
+- `terrain.frag` bakes the mountains and the Milky Way once per resize.
+- `ambient.frag` averages the aurora light into a 1×1 texture that lights the snow, the shoreline and the rim of the foreground rocks.
+- `landscape.frag` mirrors and ripples everything for the water.
+- Bloom adds the glow.
+
+### 3 · Starry Night (`Scene3StarryNight.js`, `shaders/starry/`)
 
 A living oil painting, tuned for Schubert/Liszt *Ständchen*. The reference is Van Gogh's painting itself (`public/textures/starry-night.jpg`, 1889, public domain); if it fails to load, a procedural underpainting (`field.frag`) takes its place.
 
@@ -164,7 +174,7 @@ Each frame runs these passes:
 
 The landscape (cypress sway, hills and village with lit windows) is part of the same pipeline: a mask (`mask.frag`, baked once) marks the regions so each can move at its own pace.
 
-**Music mapping** (all in the `CONFIG` object at the top of `Scene2StarryNight.js`):
+**Music mapping** (all in the `CONFIG` object at the top of `Scene3StarryNight.js`):
 - **Speed from `level`**: about 0.25× when quiet and 1× at mid level. Above 0.8 the scene enters a swell of up to 2.5× and stays in it until the level drops below 0.6 (hysteresis). Changes are smoothed over ~1.8 s. At the very lowest level the motion nearly freezes and the stars dim.
 - **Climax**: level above 0.85 for 2 s opens the sky. Light blooms yellow-white and glows grow, then fade over ~5 s once the level drops below 0.7.
 - **Onsets**: each attack fires a burst of 96 strokes around a star (sometimes the moon) and a brief halo pulse there.
@@ -177,16 +187,6 @@ The landscape (cypress sway, hills and village with lit windows) is part of the 
 **Performance**: the scene steps down through four quality levels (fewer strokes, smaller paint buffer) if the frame rate drops. On an Apple M4 it runs at ~145 fps uncapped at full quality.
 
 On portrait screens the painting is centre-cropped instead of squeezed.
-
-### 3 · Aurora (`Scene3Aurora.js`, `shaders/aurora/`)
-
-The curtains are thin folded sheets standing on a map. Their shapes live in a per-frame 4096×3 lookup texture (`curtains.frag`). `aurora.frag` marches upward through horizontal slices; every slice re-samples the same footprint, which stacks into vertical sheets in perspective, with a pink lower fringe, a green body and a violet crown.
-
-Supporting passes:
-- `terrain.frag` bakes the mountains and the Milky Way once per resize.
-- `ambient.frag` averages the aurora light into a 1×1 texture that lights the snow, the shoreline and the rim of the foreground rocks.
-- `landscape.frag` mirrors and ripples everything for the water.
-- Bloom adds the glow.
 
 ### 4 · Stockholm (`Scene4Stockholm.js`, `shaders/stockholm/street.frag`)
 
@@ -249,7 +249,7 @@ src/
 ## Credits
 
 - **Inspiration for Scene 1:** Pavel Dobryakov's [WebGL Fluid Simulation](https://github.com/PavelDoGreat/WebGL-Fluid-Simulation) (MIT). The solver follows its structure.
-- **Inspiration for Scene 2:** *The Starry Night* (Vincent van Gogh, 1889), which is in the public domain. Scene 2 is an original procedural interpretation, not a copy of the image.
+- **Inspiration for Scene 3:** *The Starry Night* (Vincent van Gogh, 1889), which is in the public domain. Scene 3 is an original procedural interpretation, not a copy of the image.
 - Simplex noise: Ashima Arts / Stefan Gustavson (MIT).
 - Hash functions: "Hash without Sine" by Dave Hoskins (MIT).
 - Built with [Three.js](https://threejs.org) and [Vite](https://vite.dev).

@@ -5,7 +5,7 @@ import { createTarget } from '../gl/targets.js';
 import { Bloom } from '../gl/Bloom.js';
 import { createTunePanel, configParams, bindConfig } from '../tune.js';
 import { SCORE_CONFIG } from '../scoreMap.js';
-import { PROFILE, TUNE } from './profiles/andanteFestivo.js';
+import { PROFILE, TUNE } from './profiles/standchen.js';
 
 import noiseGLSL from '../shaders/common/noise.glsl?raw';
 import commonGLSL from '../shaders/aurora/common.glsl?raw';
@@ -16,7 +16,8 @@ import ambientFrag from '../shaders/aurora/ambient.frag?raw';
 import curtainsFrag from '../shaders/aurora/curtains.frag?raw';
 
 /**
- * Scene 3: Aurora borealis over a fjord.
+ * Scene 2: Aurora borealis over a fjord, performing the Schubert/Liszt
+ * "Ständchen" (solo piano: near-silent opening, one big climax, long fade).
  *
  *   terrain.frag    static mountains + Milky Way, baked once per resize
  *   curtains.frag   per-frame lookup table of curtain shapes (4096 x 3)
@@ -26,7 +27,7 @@ import curtainsFrag from '../shaders/aurora/curtains.frag?raw';
  *   Bloom           soft glow on the curtains and their reflection
  *
  * Audio arrives through audio.perf (scoreMap.js), performed by
- * profiles/andanteFestivo.js: a smoothed `build` grows the curtains in
+ * profiles/standchen.js: a smoothed `build` grows the curtains in
  * height, width, coverage and brightness, sections set the state (slow, low
  * ripples in quiet passages, a warm flare at the climax), and accented
  * onsets send a soft shimmer through the rays. Bass still swells the
@@ -44,7 +45,7 @@ const AURORA = [
   { scale: 0.28, steps: 22 },
 ];
 
-export default class Scene3Aurora extends SceneBase {
+export default class Scene2Aurora extends SceneBase {
   constructor() {
     super({ baseSpeed: 0.35, speedGain: 1.5 });
     this.renderScale = 0.8;
@@ -53,7 +54,7 @@ export default class Scene3Aurora extends SceneBase {
     this.surge = 0;
     this.shimmer = 0;
     this.lastBeat = -1;
-    // performance state (profiles/andanteFestivo.js)
+    // performance state (profiles/standchen.js)
     this.stage = { ...PROFILE.STAGES.calm };
     this.build = 0;
     this.climax = 0;
@@ -98,7 +99,7 @@ export default class Scene3Aurora extends SceneBase {
     this.auroraMat.uniforms.tCurtains.value = this.curtainTarget.texture;
     this.bloom = new Bloom({ levels: 5, threshold: 0.35, knee: 0.3, strength: 0.9, radius: 1.0 });
     await this.pass.compile(renderer, [this.auroraMat, this.landMat, this.terrainMat, this.ambientMat, this.curtainMat]);
-    this.tune = createTunePanel({ title: 'Aurora · Andante Festivo', storageKey: 'resonance.tune.aurora', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
+    this.tune = createTunePanel({ title: 'Aurora · Ständchen', storageKey: 'resonance.tune.aurora', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
   }
 
   resize(width, height) {

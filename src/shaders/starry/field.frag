@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Starry Night: procedural underpainting, used only as a fallback reference
-// for scene 2 when /public/textures/starry-night.jpg is missing.
+// for scene 3 when /public/textures/starry-night.jpg is missing.
 // Output: rgb = linear colour.
 //
 // Brush direction comes from a stream function psi: the velocity
@@ -160,7 +160,7 @@ void main() {
     angle = PI * 0.5 + cy.y * 0.35 + 0.45 * sin(p.y * 17.0 + cy.y * 2.0 + uTime * 0.4);
   }
 
-  // used only as a fallback reference for scene 2 when the painting image is
+  // used only as a fallback reference for scene 3 when the painting image is
   // missing: linear colour, like a sampled sRGB texture
   gl_FragColor = vec4(pow(col, vec3(2.2)), 1.0);
 }

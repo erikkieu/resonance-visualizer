@@ -7,8 +7,8 @@ import * as THREE from 'three';
 /** Scene registry. Modules are imported lazily the first time they are needed. */
 export const SCENES = [
   { name: 'Liquid Paint', sub: 'acrylic fluid pour', load: () => import('./scenes/Scene1Fluid.js') },
-  { name: 'Starry Night', sub: 'after Van Gogh, 1889', load: () => import('./scenes/Scene2StarryNight.js') },
-  { name: 'Aurora', sub: 'borealis over the fjord', load: () => import('./scenes/Scene3Aurora.js') },
+  { name: 'Aurora', sub: 'borealis over the fjord', load: () => import('./scenes/Scene2Aurora.js') },
+  { name: 'Starry Night', sub: 'after Van Gogh, 1889', load: () => import('./scenes/Scene3StarryNight.js') },
   { name: 'Stockholm', sub: 'silent film, 1930s', load: () => import('./scenes/Scene4Stockholm.js') },
   { name: 'Galaxy', sub: 'deep space', load: () => import('./scenes/Scene5Galaxy.js') },
 ];
