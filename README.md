@@ -44,6 +44,7 @@ Microphone input needs a secure context, so use `localhost` or HTTPS. GitHub Pag
 - **D**: debug overlay for live tuning. It shows pitch height (with its frequency, peak-vs-centroid confidence and adaptive range), loudness, the dominant note with 12-bin chroma, and the scene's values. For Scene 1 that includes a swatch of the colour new paint is getting. It stays visible when the rest of the UI hides.
 - **Space**: play or pause the loaded file
 - **Drag on the canvas** (Scene 1): pour paint with the mouse or a finger
+- **Move the mouse** (Scene 2): push the brush strokes aside
 - **Move the mouse** (Scene 5): camera parallax
 
 The UI auto-hides after 3 s without mouse movement and comes back when you move the mouse.
@@ -71,6 +72,8 @@ With no audible input, the scenes run on a gentle built-in "idle" signal, so the
 | `density` | notes per second, smoothed (~7 notes/s = 1) |
 | `pitchHeight` | how high the melody is. Strongest peak in 150–2000 Hz from an 8192-point FFT, refined by parabolic interpolation, blending toward the spectral centroid when the peak isn't prominent. Log scale, fast attack (80 ms) / slow release (500 ms), stretched over the range heard in the last 20 s. Debug values: `pitchHz`, `pitchConfidence`, `pitchHeightRaw`, `pitchLo` / `pitchHi`. |
 | `chroma` / `dominantNote` / `noteStrength` | 12-bin pitch-class profile (C…B), its strongest class (with a small hysteresis margin), and how clearly it stands out |
+| `level` | loudness relative to the track itself: 0.5 s RMS in dB, placed between the min and max heard in the last 20 s. A prior ceiling (−20 dBFS, relaxing over 40 s) keeps a quiet intro from reading as loud before the track has shown its range. Settings in `LEVEL_CONFIG`. |
+| `onset` / `onsetId` / `onsetRate` | piano-style attacks from spectral flux in 100–2000 Hz with an adaptive threshold and a 70 ms refractory period; `onsetRate` is attacks per second. Settings in `ONSET_CONFIG`. |
 
 Processing details:
 - Every value goes through attack/release smoothing (fast rise, slow fall).
@@ -89,7 +92,7 @@ The speed multiplier is lerped toward its target, so motion never jerks (`src/sc
 | Scene | energy | bass | mid | treble | beat |
 | --- | --- | --- | --- | --- | --- |
 | 1 Liquid Paint | via a slow "drive" (loudness + note density): simulation speed, pour rate and force; loudness also sets paint intensity and saturation | continuo pours from below | vorticity (curl) strength | tiny bright specks, more cells, glints | extra pours once the music has built up; each **note** leaves a curling flourish; **pitch height** colours all paint |
-| 2 Starry Night | swirl rotation and flow speed; cypress sway | star halos and moon glow | brush-stroke turbulence | star twinkle | — |
+| 2 Starry Night | adaptive `level` sets flow speed (near-freeze → 2.5× swell), climax opens the sky; cypress sway | moon and spiral breathe | — | star twinkle, sparkles | piano **onsets** fire stroke bursts and a halo pulse; the held **note** tints the sky; **pitch height** lifts spiral and moon |
 | 3 Aurora | wave speed and brightness | curtains swell and flare upward | fold frequency | fine vertical rays, star twinkle | green-to-pink colour surge |
 | 4 Stockholm | speed of trams, cars and pedestrians | light flicker, camera shake | — | grain, dust, scratches | exposure flash |
 | 5 Galaxy | rotation speed, camera drift | core glow, arm expansion | ripples through the particles | star sparkle | shockwave rings travelling outward |
@@ -150,11 +153,30 @@ Tune it with `IDLE_SPEED`, `MUSIC_SPEED`, `DRIVE_RISE`, `DRIVE_FALL`, `DRIVE_FRO
 
 ### 2 · Starry Night (`Scene2StarryNight.js`, `shaders/starry/`)
 
-Two passes:
-- **`field.frag`** (low resolution) paints an underpainting. Brush direction comes from the stream function of several vortices, so strokes swirl around the great spiral, every star and the moon.
-- **`strokes.frag`** lays three layers of oriented, tapered, slightly bent brush strokes over it, each sampling the underpainting once at its centre. Bristle grooves and screen-space-derivative lighting give an impasto ridge look.
+A living oil painting, tuned for Schubert/Liszt *Ständchen*. The reference is Van Gogh's painting itself (`public/textures/starry-night.jpg`, 1889, public domain); if it fails to load, a procedural underpainting (`field.frag`) takes its place.
 
-Star cores and the village windows are added crisply on top. On portrait screens the painting is centre-cropped instead of squeezed.
+Each frame runs these passes:
+1. **`flow.frag`**: a flow field from the stream function of Gaussian vortices (the great spiral, every star, the moon) plus light curl noise. The village is almost still; the sky turns.
+2. **`state.frag`**: up to 60,000 strokes live in a float texture (position, age, life). They drift along the flow, age, and respawn in their home region. The mouse pushes them aside.
+3. **`canvas.frag`**: a persistent paint buffer that smears along the flow and slowly relaxes back to the painting.
+4. **Strokes**: instanced, tapered, bent quads (`stroke.vert` / `stroke.frag`) coloured from the painting, laid onto the paint buffer. Strokes that stray from their region fade out, so the cypress and village keep their shapes. Onset bursts (`burst.vert`) add short-lived fans of strokes.
+5. **`final.frag`**: impasto lighting from the paint's luminance, canvas weave, note tint, warm glows from a mipmapped light mask (stars, moon, village windows), onset halo pulses, treble twinkle and a vignette.
+
+The landscape (cypress sway, hills and village with lit windows) is part of the same pipeline: a mask (`mask.frag`, baked once) marks the regions so each can move at its own pace.
+
+**Music mapping** (all in the `CONFIG` object at the top of `Scene2StarryNight.js`):
+- **Speed from `level`**: about 0.25× when quiet and 1× at mid level. Above 0.8 the scene enters a swell of up to 2.5× and stays in it until the level drops below 0.6 (hysteresis). Changes are smoothed over ~1.8 s. At the very lowest level the motion nearly freezes and the stars dim.
+- **Climax**: level above 0.85 for 2 s opens the sky. Light blooms yellow-white and glows grow, then fade over ~5 s once the level drops below 0.7.
+- **Onsets**: each attack fires a burst of 96 strokes around a star (sometimes the moon) and a brief halo pulse there.
+- **Held note**: after ~300 ms the dominant note tints the bright swirls and halos. D is cobalt, F cyan, A pale yellow; other notes interpolate.
+- **Melody / bass / treble**: a higher melody lifts the spiral and the moon, bass makes them breathe, and treble makes the stars twinkle.
+- **Cypress**: sways with energy.
+
+**Debug (D)** shows speed (target, swell state), climax, held note with tint swatch, onset rate and stroke count.
+
+**Performance**: the scene steps down through four quality levels (fewer strokes, smaller paint buffer) if the frame rate drops. On an Apple M4 it runs at ~145 fps uncapped at full quality.
+
+On portrait screens the painting is centre-cropped instead of squeezed.
 
 ### 3 · Aurora (`Scene3Aurora.js`, `shaders/aurora/`)
 
@@ -178,7 +200,7 @@ The film treatment covers:
 
 Motion and film artefacts step at 18 fps, and the scene only re-renders when a new film frame starts.
 
-**Optional photo plate:** put an image in `public/textures/` (for example `stockholm.jpg`) and it becomes the background plate, with the trams, cars and people layered over it. Images there are discovered at dev/build time through a tiny Vite plugin (`vite.config.js`), so nothing is fetched speculatively. That folder is git-ignored because photos are often copyrighted, so the published site always renders the street procedurally.
+**Optional photo plate:** put an image in `public/textures/` (for example `stockholm.jpg`) and it becomes the background plate, with the trams, cars and people layered over it. Images there are discovered at dev/build time through a tiny Vite plugin (`vite.config.js`), so nothing is fetched speculatively. That folder is git-ignored because photos are often copyrighted (the public-domain Starry Night is the only exception), so the published site always renders the street procedurally.
 
 ### 5 · Galaxy (`Scene5Galaxy.js`, `shaders/galaxy/`)
 

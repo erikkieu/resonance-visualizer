@@ -3,6 +3,9 @@ import { SceneBase } from './SceneBase.js';
 import { FullscreenPass, passMaterial } from '../gl/FullscreenPass.js';
 import { createTarget } from '../gl/targets.js';
 import { Bloom } from '../gl/Bloom.js';
+import { createTunePanel, configParams, bindConfig } from '../tune.js';
+import { SCORE_CONFIG } from '../scoreMap.js';
+import { PROFILE, TUNE } from './profiles/andanteFestivo.js';
 
 import noiseGLSL from '../shaders/common/noise.glsl?raw';
 import commonGLSL from '../shaders/aurora/common.glsl?raw';
@@ -22,10 +25,16 @@ import curtainsFrag from '../shaders/aurora/curtains.frag?raw';
  *   landscape.frag  sky, stars, snowy mountains, rippled reflection, rocks
  *   Bloom           soft glow on the curtains and their reflection
  *
- * Audio: energy -> wave speed (scene clock) and brightness, bass -> curtains
- * swell upward, mid -> fold frequency, treble -> fine rays and star twinkle,
- * beat -> brief green-to-pink colour surge.
+ * Audio arrives through audio.perf (scoreMap.js), performed by
+ * profiles/andanteFestivo.js: a smoothed `build` grows the curtains in
+ * height, width, coverage and brightness, sections set the state (slow, low
+ * ripples in quiet passages, a warm flare at the climax), and accented
+ * onsets send a soft shimmer through the rays. Bass still swells the
+ * curtains, mid sets the fold frequency, treble the fine rays and twinkle.
  */
+
+const SHAPE_KEYS = ['height', 'width', 'cover', 'bright', 'fold'];
+const lerp = (a, b, x) => a + (b - a) * x;
 
 // aurora pass resolution (fraction of the scene target) and slice count
 const AURORA = [
@@ -42,7 +51,15 @@ export default class Scene3Aurora extends SceneBase {
     this.toneMapped = true;
     this.exposure = 1.15;
     this.surge = 0;
+    this.shimmer = 0;
     this.lastBeat = -1;
+    // performance state (profiles/andanteFestivo.js)
+    this.stage = { ...PROFILE.STAGES.calm };
+    this.build = 0;
+    this.climax = 0;
+    this.speed = 0.5;
+    this.shape = { height: 1, width: 1, cover: 0.5, bright: 1, fold: 1, warm: 0 };
+    this.jumpId = -1;
   }
 
   async init(renderer) {
@@ -57,6 +74,12 @@ export default class Scene3Aurora extends SceneBase {
       uEnergy: { value: 0 },
       uSurge: { value: 0 },
       uResolution: { value: new THREE.Vector2(1, 1) },
+      uHeight: { value: 1 },
+      uWidth: { value: 1 },
+      uCover: { value: 0.5 },
+      uFold: { value: 1 },
+      uBright: { value: 1 },
+      uWarm: { value: 0 },
     };
     const prefix = noiseGLSL + commonGLSL;
     this.auroraMat = passMaterial({
@@ -75,6 +98,7 @@ export default class Scene3Aurora extends SceneBase {
     this.auroraMat.uniforms.tCurtains.value = this.curtainTarget.texture;
     this.bloom = new Bloom({ levels: 5, threshold: 0.35, knee: 0.3, strength: 0.9, radius: 1.0 });
     await this.pass.compile(renderer, [this.auroraMat, this.landMat, this.terrainMat, this.ambientMat, this.curtainMat]);
+    this.tune = createTunePanel({ title: 'Aurora · Andante Festivo', storageKey: 'resonance.tune.aurora', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
   }
 
   resize(width, height) {
@@ -109,20 +133,85 @@ export default class Scene3Aurora extends SceneBase {
   }
 
   update(dt, audio) {
-    this.tick(dt, audio);
-    if (audio.beatId !== this.lastBeat) {
+    const P = PROFILE;
+    const perf = audio.perf;
+    const presence = audio.presence;
+    const follow = (v, to, tau) => v + (to - v) * (1 - Math.exp(-dt / tau));
+    const jumped = perf.jumpId !== this.jumpId; // a seek: settle into the new moment at once
+    this.jumpId = perf.jumpId;
+
+    // --- section state, blending into the next one ahead of the change
+    const now = P.STAGES[perf.stage] ?? P.STAGES.calm;
+    const next = perf.next ? P.STAGES[perf.next.stage] ?? now : now;
+    const x = perf.next ? Math.min(1, Math.max(0, 1 - perf.timeToNext / SCORE_CONFIG.LOOKAHEAD)) : 0;
+    const cross = x * x * (3 - 2 * x);
+    for (const k of Object.keys(this.stage)) {
+      const target = lerp(now[k], next[k], cross);
+      this.stage[k] = jumped ? target : follow(this.stage[k], target, P.STAGE_BLEND / 3);
+    }
+    const st = this.stage;
+
+    // --- build and climax
+    const B = P.BUILD;
+    const buildTarget = presence * Math.pow(perf.drive, B.CURVE);
+    this.build = jumped ? buildTarget : follow(this.build, buildTarget, buildTarget > this.build ? B.ATTACK : B.RELEASE);
+    this.climax = jumped ? perf.climax * presence : follow(this.climax, perf.climax * presence, 1.0);
+
+    // --- the clock: slow ripples when quiet; with nothing playing, the old gentle idle
+    const speedTarget = lerp(0.35 + 1.5 * audio.energy, lerp(P.SPEED.QUIET, P.SPEED.FULL, this.build) * st.speed, presence);
+    this.speed = jumped ? speedTarget : follow(this.speed, speedTarget, P.SPEED.SMOOTHING / 2);
+    this.time += dt * this.speed;
+
+    // --- curtain shape and light: lerp(QUIET, FULL, build) x stage + CLIMAX x climax (idle: the plain look)
+    const plain = { height: 1, width: 1, cover: 0.5, bright: 1, fold: 1 };
+    for (const k of SHAPE_KEYS) {
+      const c = P[k.toUpperCase()];
+      this.shape[k] = lerp(plain[k], lerp(c.QUIET, c.FULL, this.build) * st[k] + c.CLIMAX * this.climax, presence);
+    }
+    this.shape.warm = lerp(0, lerp(P.WARM.QUIET, P.WARM.FULL, this.build) + P.WARM.CLIMAX * this.climax, presence);
+    this.exposure = lerp(1.15, lerp(P.EXPOSURE.QUIET, P.EXPOSURE.FULL, this.build) + P.EXPOSURE.CLIMAX * this.climax, presence);
+
+    // --- accents: a soft shimmer and colour surge (live: the old beat surge)
+    const A = P.ACCENT;
+    if (perf.source === 'score') {
+      for (const o of perf.onsets) {
+        if (!o.accent || o.strength < A.MIN_STRENGTH) continue;
+        this.shimmer = Math.min(1, this.shimmer + A.SHIMMER * o.strength);
+        this.surge = Math.min(1, this.surge + A.SURGE * o.strength);
+      }
+      this.lastBeat = audio.beatId;
+    } else if (audio.beatId !== this.lastBeat) {
       this.lastBeat = audio.beatId;
       this.surge = Math.min(1, this.surge + 0.55 + 0.4 * audio.energy);
     }
-    this.surge *= Math.exp(-dt * 2.2);
+    const decay = perf.source === 'score' ? A.DECAY : 1 / 2.2;
+    this.surge *= Math.exp(-dt / decay);
+    this.shimmer *= Math.exp(-dt / decay);
 
     const s = this.shared;
     s.uTime.value = this.time;
     s.uBass.value = audio.bass;
     s.uMid.value = audio.mid;
-    s.uTreble.value = audio.treble;
+    s.uTreble.value = Math.min(1, audio.treble + this.shimmer);
     s.uEnergy.value = audio.energy;
     s.uSurge.value = this.surge;
+    s.uHeight.value = this.shape.height;
+    s.uWidth.value = this.shape.width;
+    s.uCover.value = this.shape.cover;
+    s.uFold.value = this.shape.fold;
+    s.uBright.value = this.shape.bright;
+    s.uWarm.value = this.shape.warm;
+  }
+
+  /** Live values for the debug overlay (D). */
+  get debug() {
+    const sh = this.shape;
+    return {
+      'speed ×': this.speed.toFixed(2),
+      build: `${this.build.toFixed(2)} · climax ${this.climax.toFixed(2)} · exposure ${this.exposure.toFixed(2)}`,
+      curtains: `height ${sh.height.toFixed(2)} · width ${sh.width.toFixed(2)} · cover ${sh.cover.toFixed(2)}`,
+      light: `bright ${sh.bright.toFixed(2)} · warm ${sh.warm.toFixed(2)} · fold ${sh.fold.toFixed(2)}`,
+    };
   }
 
   render(target) {
@@ -134,6 +223,7 @@ export default class Scene3Aurora extends SceneBase {
   }
 
   dispose() {
+    this.tune?.dispose();
     this.auroraTarget?.dispose();
     this.sceneTarget?.dispose();
     this.terrainTarget?.dispose();

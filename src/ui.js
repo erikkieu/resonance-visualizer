@@ -1,9 +1,12 @@
 import { SCENES } from './SceneManager.js';
+import { availablePiece, playPiece } from './library.js';
 
 /**
  * ui.js: all DOM chrome. Scene buttons, audio source controls, transport,
  * level meter, start overlay, drag & drop, toasts, the hint line, and the
  * show/hide logic (H toggle plus auto-hide after 3 s of inactivity).
+ * Each scene offers the piece it was made for (src/pieces.js) when its audio
+ * is in /public/Music: a button above the sources, or P.
  */
 
 const IDLE_HIDE_MS = 3000;
@@ -71,6 +74,7 @@ export function createUI({ manager, audio, toggleFullscreen }) {
     if (type === 'switch') {
       sceneButtons.forEach((b, i) => b.classList.toggle('active', i === index));
       setLabel(index);
+      refreshPiece();
     }
     if (type === 'error') toast(`Scene ${index + 1} could not start on this device`);
   });
@@ -103,6 +107,37 @@ export function createUI({ manager, audio, toggleFullscreen }) {
     }
   }
 
+  /** The current scene's piece, unless it is already the one loaded. */
+  function offeredPiece() {
+    const piece = availablePiece(Math.max(0, manager.index));
+    return piece && !(audio.mode === 'file' && audio.pieceId === piece.id) ? piece : null;
+  }
+
+  async function playScenePiece() {
+    const piece = availablePiece(Math.max(0, manager.index));
+    if (!piece) return toast('No piece for this scene in /public/Music');
+    begin();
+    if (audio.mode === 'file' && audio.pieceId === piece.id) return audio.togglePlay().catch(() => {});
+    try {
+      await playPiece(audio, piece);
+    } catch (err) {
+      if (err?.name === 'NotAllowedError') toast('Press play to start the piece');
+      else toast(`Could not play ${piece.title}`);
+    }
+  }
+
+  function refreshPiece() {
+    const piece = offeredPiece();
+    $('btn-piece').hidden = !piece;
+    if (piece) {
+      $('piece-title').textContent = piece.title;
+      $('piece-composer').textContent = piece.composer;
+    }
+    const startPiece = availablePiece(Math.max(0, manager.index));
+    $('start-piece').hidden = !startPiece;
+    if (startPiece) $('start-piece-name').textContent = startPiece.title;
+  }
+
   async function useDemo() {
     begin();
     await audio.useDemo();
@@ -119,6 +154,11 @@ export function createUI({ manager, audio, toggleFullscreen }) {
   $('start-file').addEventListener('click', (e) => {
     e.stopPropagation();
     pickFile();
+  });
+  $('btn-piece').addEventListener('click', playScenePiece);
+  $('start-piece').addEventListener('click', (e) => {
+    e.stopPropagation();
+    playScenePiece();
   });
   $('start-demo').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -159,6 +199,7 @@ export function createUI({ manager, audio, toggleFullscreen }) {
       file: audio.isPlaying ? 'Playing' : 'Paused',
     }[m];
     $('source-status').textContent = status;
+    refreshPiece();
   }
   audio.onChange(refreshSource);
   refreshSource();
@@ -280,5 +321,6 @@ export function createUI({ manager, audio, toggleFullscreen }) {
       return started;
     },
     togglePlay: () => audio.togglePlay().catch(() => {}),
+    playScenePiece,
   };
 }

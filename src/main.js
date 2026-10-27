@@ -5,6 +5,8 @@ import { createUI } from './ui.js';
 import { createDebugOverlay } from './debug.js';
 import { pointer, resetPointerDeltas } from './input.js';
 import { supportsHalfFloatTargets } from './gl/targets.js';
+import { Performance } from './scoreMap.js';
+import { connectLibrary } from './library.js';
 
 /**
  * main.js: renderer, frame loop, keyboard/pointer input and adaptive quality.
@@ -68,6 +70,11 @@ function boot() {
     showFallback('The GPU context was lost', 'Reload the page to restart the visualizer.');
   });
 
+  // the score follower: scenes read the blended view of the music as audio.perf
+  const perf = new Performance(audio);
+  audio.perf = perf;
+  connectLibrary(audio, perf);
+
   const manager = new SceneManager(renderer);
   const ui = createUI({ manager, audio, toggleFullscreen });
   const debug = createDebugOverlay({ audio, manager });
@@ -106,7 +113,11 @@ function boot() {
     audio.ensureContext().catch(() => {}); // any gesture may unlock audio
 
     const k = e.key.toLowerCase();
-    if (k >= '1' && k <= String(SCENES.length)) {
+    if (debug.visible && e.shiftKey && /^Digit\d$/.test(e.code)) {
+      // scrub: with the debug overlay open, Shift+0..9 jumps to 0 %, 10 % ... 90 % of the piece
+      const d = audio.perf?.map?.duration;
+      if (d) audio.seekTo((Number(e.code.slice(5)) / 10) * d);
+    } else if (k >= '1' && k <= String(SCENES.length)) {
       ui.begin();
       ui.activity();
       manager.switchTo(Number(k) - 1);
@@ -116,6 +127,8 @@ function boot() {
       ui.toggleHidden();
     } else if (k === 'd') {
       debug.toggle();
+    } else if (k === 'p') {
+      ui.playScenePiece();
     } else if (k === ' ') {
       e.preventDefault();
       ui.togglePlay();
@@ -183,6 +196,7 @@ function boot() {
     const dt = Math.min(Math.max(rawDt, 0), 1 / 15); // clamp hitches so sims stay stable
 
     audio.update(dt);
+    perf.update(dt);
     manager.update(dt, audio);
     resetPointerDeltas();
     manager.render();
@@ -213,10 +227,12 @@ function boot() {
   manager.switchTo(0);
   requestAnimationFrame(frame);
 
-  if (import.meta.env.DEV) {
+  // dev builds, or any build opened with ?debug, expose internals for tuning and tests
+  if (import.meta.env.DEV || new URLSearchParams(location.search).has('debug')) {
     window.__resonance = {
       manager,
       audio,
+      perf,
       renderer,
       get fps() {
         return fps;

@@ -24,6 +24,10 @@
 
       <div class="bottom">
         <div class="audio-panel glass" id="audio-panel">
+          <button class="btn piece-offer" id="btn-piece" title="Play this scene's piece (P)" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7Z" /></svg>
+            <span class="piece-text"><span class="piece-title" id="piece-title"></span><span class="piece-composer" id="piece-composer"></span></span>
+          </button>
           <div class="source-buttons">
             <button class="btn" id="btn-mic" title="Use microphone">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0M12 17v4m-3 0h6" /></svg>
@@ -55,7 +59,7 @@
         </div>
 
         <div class="center-col">
-          <div class="hint gone" id="hint">1-5 scenes · F fullscreen · H hide UI</div>
+          <div class="hint gone" id="hint">1-5 scenes · P play the piece · F fullscreen · H hide UI</div>
           <nav class="scene-buttons glass" id="scene-buttons" aria-label="Scenes"></nav>
         </div>
 
@@ -77,8 +81,12 @@
     <div id="start" class="start">
       <div class="start-card">
         <h1>Resonance</h1>
-        <p class="start-sub">Click to begin · choose microphone or drop an audio file</p>
+        <p class="start-sub">Click to begin · play the scene&rsquo;s piece, use the microphone or drop an audio file</p>
         <div class="start-buttons">
+          <button class="btn big" id="start-piece" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7Z" /></svg>
+            <span id="start-piece-name">Scene piece</span>
+          </button>
           <button class="btn big" id="start-mic">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0M12 17v4m-3 0h6" /></svg>
             Microphone
@@ -92,7 +100,7 @@
             Demo mode
           </button>
         </div>
-        <p class="start-foot">1-5 scenes · F fullscreen · H hide UI</p>
+        <p class="start-foot">1-5 scenes · P play the scene&rsquo;s piece · F fullscreen · H hide UI · D debug</p>
       </div>
     </div>
 

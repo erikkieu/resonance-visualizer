@@ -7,12 +7,15 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "analyze": "node scripts/analyze.mjs",
+    "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
     "three": "^0.186.1"
   },
   "devDependencies": {
+    "playwright": "^1.64.1",
     "vite": "^8.3.5"
   },
   "license": "MIT",

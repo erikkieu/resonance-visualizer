@@ -12,6 +12,13 @@ uniform float uTreble;
 uniform float uEnergy;
 uniform float uSurge;     // beat-driven colour surge, 0..1
 uniform vec2 uResolution;
+// shape and light multipliers set by the scene's music profile (1 = the plain look)
+uniform float uHeight;    // curtain height
+uniform float uWidth;     // sheet thickness
+uniform float uCover;     // 0..1 share of each curtain's length that is lit
+uniform float uFold;      // ripple / fold amplitude
+uniform float uBright;    // overall curtain brightness
+uniform float uWarm;      // 0..1 the green body warms toward gold, the crown toward pink-white
 
 const float HORIZON = 0.36;
 const float FOCAL = 1.1;

@@ -27,13 +27,14 @@ void main() {
 
   float t = uTime;
   // bass makes the curtains swell and flare upward
-  float topAlt = 2.3 * (1.0 + 0.7 * uBass);
+  float topAlt = 2.3 * (1.0 + 0.7 * uBass) * uHeight;
   float N = uSteps;
   // per-pixel jitter of the slice offsets hides banding between slices
   float jitter = hash12(gl_FragCoord.xy + fract(t * 7.0) * 13.0);
 
   vec3 green = mix(vec3(0.05, 1.0, 0.32), vec3(1.0, 0.2, 0.6), uSurge * 0.7);
-  vec3 violet = vec3(0.45, 0.15, 1.0);
+  green = mix(green, vec3(0.85, 0.95, 0.35), uWarm * 0.6); // warm, golden-green at the climax
+  vec3 violet = mix(vec3(0.45, 0.15, 1.0), vec3(1.0, 0.6, 0.85), uWarm * 0.5);
   vec3 magenta = vec3(0.9, 0.12, 0.55);
 
   // how far the footprint point moves between two slices: the sheet is
@@ -51,7 +52,7 @@ void main() {
 
     float glow = 0.0;
     float lu = clamp(q.x / 100.0 + 0.5, 0.0, 1.0);
-    float w = 0.18 + 0.12 * f;
+    float w = (0.18 + 0.12 * f) * uWidth;
     float we = sqrt(w * w + 0.36 * slicePitch * slicePitch);
     for (int k = 0; k < CURTAINS; k++) {
       vec2 c = texture2D(tCurtains, vec2(lu, (float(k) + 0.5) / 3.0)).rg;
@@ -68,7 +69,7 @@ void main() {
     acc += col * glow * fade;
   }
 
-  float brightness = (0.7 + 0.8 * uEnergy) * (1.0 + 0.45 * uBass) * (1.0 + 0.6 * uSurge);
+  float brightness = (0.7 + 0.8 * uEnergy) * (1.0 + 0.45 * uBass) * (1.0 + 0.6 * uSurge) * uBright;
   // a thin sheet is crossed by only ~1-2 slices per pixel, hence the large gain
   vec3 col = acc * brightness * (175.0 / N);
   col *= smoothstep(0.0, 0.05, rd.y);

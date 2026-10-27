@@ -19,6 +19,13 @@
  *             peak is not prominent), on a log scale, fast attack / slow
  *             release, stretched over the range heard in the last ~20 s
  *             (pitchHz, pitchConfidence, pitchHeightRaw, pitchLo/pitchHi for debugging)
+ *   level     adaptive loudness: (dB - recentMin) / (recentMax - recentMin) over
+ *             the last LEVEL_CONFIG.WINDOW seconds (levelDb / levelMinDb / levelMaxDb)
+ *   onsetId   increments on every piano-style onset (spectral flux 100-2000 Hz);
+ *   onset     pulse that jumps to 1 on an onset, then decays; onsetRate = onsets / s
+ *   melodyNoteId  increments on every melody note (sensitive onsets in 200 Hz-3 kHz),
+ *             tuned on Drottningholmsmusiken to catch the bowed/legato notes
+ *             noteId misses; melodyNote is its decaying pulse
  *   chroma / dominantNote / dominantNoteName / noteStrength
  *             12-bin pitch-class profile (C..B) and its strongest class
  *
@@ -45,6 +52,39 @@ export const PITCH_CONFIG = {
   CHROMA_MAX_HZ: 4000,
   CHROMA_SMOOTHING: 0.35, // s
   DOMINANT_MARGIN: 0.12, // a new dominant note must beat the current one by 12 %
+};
+// Adaptive loudness level
+export const LEVEL_CONFIG = {
+  WINDOW: 20, // s of history for recentMin / recentMax
+  INTEGRATION: 0.5, // s, short-term loudness averaging
+  MIN_RANGE_DB: 6, // never stretch less than this many dB over 0..1 (steady music reads ~0.5)
+  WARMUP: 0.75, // s of audible signal ignored at the start (a fade-in would fake a huge range)
+  MIN_HISTORY: 4, // s of history before the level is fully trusted (until then it leans to 0.5)
+  SILENCE_DB: -50, // below this the input counts as silence: the one absolute threshold left
+  // Until loud music has actually been heard, the ceiling starts at a typical
+  // loud level and relaxes toward the observed maximum, so a very quiet intro
+  // reads quiet (not as "the loudest so far") and a crescendo rises gradually.
+  PRIOR_MAX_DB: -20,
+  PRIOR_RELAX: 40, // s
+};
+// Piano-style note onsets
+export const ONSET_CONFIG = {
+  MIN_HZ: 100,
+  MAX_HZ: 2000,
+  K: 1.4, // threshold = mean + K * std of the recent flux
+  FLOOR: 0.006,
+  REFRACTORY: 0.07, // s between two onsets
+};
+// Melody notes: a more sensitive onset detector over the melody range.
+// Tuned offline on Drottningholmsmusiken (Roman): about 4.7 notes/s against
+// noteId's 1.8, with timing that still follows the rhythm (gaps fall on the
+// sixteenth grid as often as noteId's do), and next to nothing in silence.
+export const MELODY_CONFIG = {
+  MIN_HZ: 200,
+  MAX_HZ: 3000,
+  K: 0.6, // threshold = mean + K * std of the recent flux
+  FLOOR: 0.002,
+  REFRACTORY: 0.11, // s between two notes (a sixteenth at ~104 bpm is 0.145 s)
 };
 // ============================================================================
 
@@ -162,6 +202,15 @@ class AudioEngine {
     this.chroma = new Float32Array(12).fill(1 / 12);
     this.dominantNote = 2;
     this.noteStrength = 0;
+    this.level = 0;
+    this.levelDb = -Infinity;
+    this.levelMinDb = -Infinity;
+    this.levelMaxDb = -Infinity;
+    this.onset = 0;
+    this.onsetId = 0;
+    this.onsetRate = 0;
+    this.melodyNote = 0;
+    this.melodyNoteId = 0;
     this._noteCount = 0; // leaky note counter for the density estimate
     /** 0 = fully synthetic, 1 = fully live input */
     this.liveMix = 0;
@@ -176,6 +225,18 @@ class AudioEngine {
     this._beatDetector = new OnsetDetector({ k: 1.6, floor: 0.012, refractory: 0.26 });
     // broadband onsets = individual notes (bowed/plucked attacks, no drums needed)
     this._noteDetector = new OnsetDetector({ k: 1.3, floor: 0.006, refractory: 0.09 });
+    // piano-style onsets in the melody/accompaniment range
+    this._onsetDetector = new OnsetDetector({ k: ONSET_CONFIG.K, floor: ONSET_CONFIG.FLOOR, refractory: ONSET_CONFIG.REFRACTORY });
+    this._onsetCount = 0; // leaky onset counter for the rate
+    this._melodyDetector = new OnsetDetector({ k: MELODY_CONFIG.K, floor: MELODY_CONFIG.FLOOR, refractory: MELODY_CONFIG.REFRACTORY });
+    // adaptive loudness: short-term mean square and a ring of recent dB values
+    this._meanSquare = 0;
+    this._levelRing = new Float32Array(LEVEL_CONFIG.WINDOW * HISTORY_HZ);
+    this._levelCount = 0;
+    this._levelIndex = 0;
+    this._levelClock = 0;
+    this._audibleTime = 0;
+    this._levelPrior = LEVEL_CONFIG.PRIOR_MAX_DB;
     // Long memories: a soft movement after a loud one must stay soft (Baroque
     // terraced dynamics, slow movements), yet a changed volume knob adapts
     // within a minute.
@@ -196,6 +257,7 @@ class AudioEngine {
 
     this.element = null;
     this.fileName = '';
+    this.pieceId = null; // id from src/pieces.js when a library piece is playing
     this._objectUrl = null;
     this._mic = null;
   }
@@ -269,6 +331,8 @@ class AudioEngine {
     const fastN = this.onsetAnalyser.frequencyBinCount;
     const toFastBin = (hz) => Math.min(fastN - 1, Math.max(1, Math.round(hz / fastHz)));
     this.noteBins = [toFastBin(150), toFastBin(6000)];
+    this.onsetBins = [toFastBin(ONSET_CONFIG.MIN_HZ), toFastBin(ONSET_CONFIG.MAX_HZ)];
+    this.melodyBins = [toFastBin(MELODY_CONFIG.MIN_HZ), toFastBin(MELODY_CONFIG.MAX_HZ)];
 
     // Long FFT: melody band for the pitch peak, and the chroma folding table
     const C = PITCH_CONFIG;
@@ -299,6 +363,14 @@ class AudioEngine {
   _resetPitchHistory() {
     this._pitchCount = 0;
     this._pitchIndex = 0;
+    // the loudness history belongs to the old source too
+    this._levelCount = 0;
+    this._levelIndex = 0;
+    this._audibleTime = 0;
+    this._meanSquare = 0;
+    this._levelPrior = LEVEL_CONFIG.PRIOR_MAX_DB;
+    this.levelMinDb = -Infinity;
+    this.levelMaxDb = -Infinity;
   }
 
   _ensureElement() {
@@ -310,6 +382,7 @@ class AudioEngine {
     el.addEventListener('play', () => this._emit());
     el.addEventListener('pause', () => this._emit());
     el.addEventListener('loadedmetadata', () => this._emit());
+    el.addEventListener('seeked', () => this._emit());
     this.element = el;
     const src = this.ctx.createMediaElementSource(el);
     src.connect(this.ctx.destination); // audible
@@ -350,6 +423,23 @@ class AudioEngine {
     this._objectUrl = URL.createObjectURL(file);
     this.element.src = this._objectUrl;
     this.fileName = file.name.replace(/\.[^.]+$/, '');
+    this.pieceId = null; // library.js may still recognise a dropped copy of a known piece
+    this._resetPitchHistory();
+    this.mode = 'file';
+    this._emit();
+    await this.element.play();
+  }
+
+  /** Plays a piece from the library (src/pieces.js) by URL. */
+  async useUrl(url, title, pieceId) {
+    await this.ensureContext();
+    this._ensureElement();
+    this._stopMic();
+    if (this._objectUrl) URL.revokeObjectURL(this._objectUrl);
+    this._objectUrl = null;
+    this.element.src = url;
+    this.fileName = title;
+    this.pieceId = pieceId;
     this._resetPitchHistory();
     this.mode = 'file';
     this._emit();
@@ -382,6 +472,12 @@ class AudioEngine {
     const el = this.element;
     if (!el || !isFinite(el.duration)) return;
     el.currentTime = clamp01(fraction) * el.duration;
+  }
+
+  seekTo(seconds) {
+    const el = this.element;
+    if (!el || !isFinite(el.duration)) return;
+    el.currentTime = Math.max(0, Math.min(el.duration, seconds));
   }
 
   get isPlaying() {
@@ -448,6 +544,20 @@ class AudioEngine {
       if (d > 0) noteFlux += d;
     }
     noteFlux /= (nhi - nlo) * 255;
+    let onsetFlux = 0;
+    const [olo, ohi] = this.onsetBins;
+    for (let i = olo; i < ohi; i++) {
+      const d = ff[i] - this.prevFast[i];
+      if (d > 0) onsetFlux += d;
+    }
+    onsetFlux /= (ohi - olo) * 255;
+    let melodyFlux = 0;
+    const [mlo, mhi] = this.melodyBins;
+    for (let i = mlo; i < mhi; i++) {
+      const d = ff[i] - this.prevFast[i];
+      if (d > 0) melodyFlux += d;
+    }
+    melodyFlux /= (mhi - mlo) * 255;
     this.prevFast.set(ff);
 
     const { pitchHz, pitchConfidence, chroma } = this._analysePitch();
@@ -458,6 +568,8 @@ class AudioEngine {
       rms,
       flux,
       noteFlux,
+      onsetFlux,
+      melodyFlux,
       pitchHz,
       pitchConfidence,
       chroma,
@@ -566,6 +678,52 @@ class AudioEngine {
     return this.pitchHeightRaw + (stretched - this.pitchHeightRaw) * trust;
   }
 
+  /**
+   * Adaptive loudness: short-term dB mapped into the [min, max] dB range of
+   * the last WINDOW seconds. Silence and the first moments after silence
+   * (a fade-in) stay out of the history, so pauses and starts do not stretch
+   * the range. Until MIN_HISTORY seconds are collected it leans toward 0.5.
+   */
+  _adaptiveLevel(rms, dt) {
+    const C = LEVEL_CONFIG;
+    this._meanSquare += (rms * rms - this._meanSquare) * (1 - Math.exp(-dt / C.INTEGRATION));
+    const db = 10 * Math.log10(this._meanSquare + 1e-12);
+    this.levelDb = db;
+    this._audibleTime = db > C.SILENCE_DB ? this._audibleTime + dt : 0;
+
+    this._levelClock += dt;
+    if (this._levelClock >= 1 / HISTORY_HZ) {
+      this._levelClock %= 1 / HISTORY_HZ;
+      if (this._audibleTime > C.WARMUP) {
+        this._levelRing[this._levelIndex] = db;
+        this._levelIndex = (this._levelIndex + 1) % this._levelRing.length;
+        this._levelCount = Math.min(this._levelCount + 1, this._levelRing.length);
+      }
+    }
+    if (this._levelCount === 0 || db <= C.SILENCE_DB) return 0;
+
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let i = 0; i < this._levelCount; i++) {
+      const v = this._levelRing[i];
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    // the prior ceiling relaxes toward what has really been heard
+    this._levelPrior += (hi - this._levelPrior) * (1 - Math.exp(-dt / C.PRIOR_RELAX));
+    hi = Math.max(hi, this._levelPrior);
+    this.levelMinDb = lo;
+    this.levelMaxDb = hi;
+    if (hi - lo < C.MIN_RANGE_DB) {
+      const mid = (hi + lo) / 2;
+      lo = mid - C.MIN_RANGE_DB / 2;
+      hi = mid + C.MIN_RANGE_DB / 2;
+    }
+    const raw = clamp01((db - lo) / (hi - lo));
+    const trust = clamp01(this._levelCount / (C.MIN_HISTORY * HISTORY_HZ));
+    return 0.5 + (raw - 0.5) * trust;
+  }
+
   /** Chroma smoothing and the dominant note (with a hysteresis margin). */
   _updateChroma(target, dt) {
     const k = 1 - Math.exp(-dt / PITCH_CONFIG.CHROMA_SMOOTHING);
@@ -601,6 +759,7 @@ class AudioEngine {
       this._synthChroma.fill(1 / 12);
       return {
         note: noteNow,
+        level: 0,
         // a slow drift in the ocean / cyan middle of the colour ramp
         height: 0.5 + 0.08 * Math.sin(t * 0.23) + 0.04 * Math.sin(t * 0.71),
         chroma: this._synthChroma,
@@ -635,6 +794,7 @@ class AudioEngine {
     chroma[fifth] += 0.18;
     return {
       note: noteNow,
+      level: clamp01(0.08 + 0.9 * section),
       height: clamp01(0.12 + 0.5 * contour + 0.35 * section),
       chroma,
       bass: clamp01(0.12 + 0.75 * kick + 0.1 * section),
@@ -654,7 +814,7 @@ class AudioEngine {
     const synth = this._synth(this.mode === 'demo' ? 1 : 0);
 
     // Gate: below ~-50 dBFS RMS we treat the input as silence and cross-fade to idle.
-    const audible = live && live.rms > 0.0035 ? 1 : 0;
+    const audible = live && 20 * Math.log10(live.rms + 1e-9) > LEVEL_CONFIG.SILENCE_DB ? 1 : 0;
     this.liveMix = follow(this.liveMix, audible, dt, 0.2, 1.4);
     const m = this.liveMix;
     const musicOn = this.mode === 'demo' || audible === 1;
@@ -679,6 +839,33 @@ class AudioEngine {
     } else {
       this.note *= Math.exp(-dt * 8);
     }
+    // piano-style onsets (the synthetic signal reuses its note events)
+    let onsetNow = false;
+    if (live && this._onsetDetector.detect(live.onsetFlux, this.time) && m > 0.5) onsetNow = true;
+    if (synth.note && m < 0.5) onsetNow = true;
+    if (onsetNow) {
+      this.onset = 1;
+      this.onsetId++;
+    } else {
+      this.onset *= Math.exp(-dt * 8);
+    }
+    this._onsetCount = this._onsetCount * Math.exp(-dt / 2) + (onsetNow ? 1 : 0);
+    this.onsetRate = this._onsetCount / 2;
+    // melody notes (the synthetic signal reuses its note events)
+    let melodyNow = false;
+    if (live && this._melodyDetector.detect(live.melodyFlux, this.time) && m > 0.5) melodyNow = true;
+    if (synth.note && m < 0.5) melodyNow = true;
+    if (melodyNow) {
+      this.melodyNote = 1;
+      this.melodyNoteId++;
+    } else {
+      this.melodyNote *= Math.exp(-dt * 8);
+    }
+
+    // adaptive loudness level (live), or the synthetic one
+    const liveLevel = live ? this._adaptiveLevel(live.rms, dt) : 0;
+    this.level = live ? liveLevel * m + synth.level * (1 - m) : synth.level;
+
     // note density: leaky counter (~2 s window) -> notes per second
     this._noteCount = this._noteCount * Math.exp(-dt / 2) + (noteNow ? 1 : 0);
     this.density = follow(this.density, clamp01(this._noteCount / 2 / DENSITY_FULL), dt, 0.6, 1.6);

@@ -63,7 +63,8 @@ export default class Scene4Stockholm extends SceneBase {
 
   /** Optional photo plate from /public/textures (discovered at build time). */
   _loadPlate() {
-    const file = plates.find((f) => /stockholm/i.test(f)) ?? plates[0];
+    // only street photos: other textures (e.g. the scene 2 painting) live here too
+    const file = plates.find((f) => /stockholm|street|plate/i.test(f));
     if (!file) return;
     const url = `${import.meta.env.BASE_URL}textures/${file}`;
     new THREE.TextureLoader().load(

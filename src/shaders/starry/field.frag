@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
-// Starry Night, pass 1: the underpainting (low resolution).
-// Output: rgb = local paint colour (sRGB), a = brush direction / PI.
+// Starry Night: procedural underpainting, used only as a fallback reference
+// for scene 2 when /public/textures/starry-night.jpg is missing.
+// Output: rgb = linear colour.
 //
 // Brush direction comes from a stream function psi: the velocity
 // (dpsi/dy, -dpsi/dx) is divergence-free, so strokes follow closed swirls
@@ -51,7 +52,8 @@ vec3 skyColor(vec2 p, float psi) {
 
   // the long luminous wind band that crosses the sky
   float wy = 0.6 + 0.06 * sin(p.x * 2.6 - 0.4 - uTime * 0.1) + 0.02 * sin(p.x * 7.0);
-  float wind = exp(-pow((p.y - wy) / 0.05, 2.0)) * smoothstep(0.05, 0.4, p.x / uLayout) * smoothstep(0.98, 0.7, p.x / uLayout);
+  float wd = (p.y - wy) / 0.05;
+  float wind = exp(-wd * wd) * smoothstep(0.05, 0.4, p.x / uLayout) * smoothstep(0.98, 0.7, p.x / uLayout);
   col = mix(col, vec3(0.50, 0.66, 0.84), wind * (0.45 + 0.25 * band));
 
   // great spiral: rotating arms of pale blue-white with a hint of green
@@ -158,6 +160,7 @@ void main() {
     angle = PI * 0.5 + cy.y * 0.35 + 0.45 * sin(p.y * 17.0 + cy.y * 2.0 + uTime * 0.4);
   }
 
-  // store orientation (strokes are symmetric, so angle mod PI)
-  gl_FragColor = vec4(col, fract(angle / PI));
+  // used only as a fallback reference for scene 2 when the painting image is
+  // missing: linear colour, like a sampled sRGB texture
+  gl_FragColor = vec4(pow(col, vec3(2.2)), 1.0);
 }

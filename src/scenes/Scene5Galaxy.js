@@ -4,6 +4,9 @@ import { Bloom } from '../gl/Bloom.js';
 import { precompile } from '../gl/FullscreenPass.js';
 import { createTarget } from '../gl/targets.js';
 import { pointer } from '../input.js';
+import { createTunePanel, configParams, bindConfig } from '../tune.js';
+import { SCORE_CONFIG } from '../scoreMap.js';
+import { PROFILE, TUNE } from './profiles/interstellar.js';
 
 import noiseGLSL from '../shaders/common/noise.glsl?raw';
 import galaxyVert from '../shaders/galaxy/galaxy.vert?raw';
@@ -27,9 +30,13 @@ import farGalaxyFrag from '../shaders/galaxy/farGalaxy.frag?raw';
  * A nebula sphere, three parallax starfield layers and a few distant
  * galaxies fill the background; bloom adds the glow.
  *
- * Audio: energy -> rotation speed and camera drift (scene clock), bass ->
- * core glow and arm expansion, mid -> ripples through the particles,
- * treble -> star sparkle, beat -> shockwave rings travelling outward.
+ * Audio arrives through audio.perf (scoreMap.js), performed by
+ * profiles/interstellar.js: one slowly smoothed `build` (the score's
+ * anticipating drive, or the live one) sets rotation, core glow, bloom,
+ * star density and how far the camera pulls back; sections set the state
+ * (stillness in quiet parts, a vast opening-up at the climax); every beat
+ * sends a shockwave ring from the core. Bass still breathes the arms and
+ * the core, mid ripples the particles, treble makes the stars sparkle.
  */
 
 const GALAXY_RADIUS = 10;
@@ -173,6 +180,14 @@ export default class Scene5Galaxy extends SceneBase {
     this.lastBeat = -1;
     this.waves = [];
     this.parallax = new THREE.Vector2();
+    // performance state (profiles/interstellar.js)
+    this.stage = { ...PROFILE.STAGES.calm };
+    this.build = 0;
+    this.climax = 0;
+    this.pull = 0;
+    this.speed = 0.5;
+    this.starShare = 1;
+    this.jumpId = -1;
   }
 
   async init(renderer) {
@@ -335,6 +350,7 @@ export default class Scene5Galaxy extends SceneBase {
     scene.add(this.core);
 
     this.bloom = new Bloom({ levels: 6, threshold: 0.95, knee: 0.5, strength: 0.75 });
+    this.tune = createTunePanel({ title: 'Galaxy · Interstellar', storageKey: 'resonance.tune.galaxy', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
     this._applyQuality();
     this.camera.position.set(0, 6, 16);
     this.camera.lookAt(0, 0, 0);
@@ -343,7 +359,8 @@ export default class Scene5Galaxy extends SceneBase {
 
   _applyQuality() {
     const f = QUALITY_FRACTION[this.quality] ?? 1;
-    this.stars?.geometry.setDrawRange(0, Math.floor(MAX_STARS * f));
+    // the music lights a share of the stars (starShare); quality caps the total
+    this.stars?.geometry.setDrawRange(0, Math.floor(MAX_STARS * f * this.starShare));
     this.dust?.geometry.setDrawRange(0, Math.floor(MAX_DUST * Math.max(0.6, f)));
   }
 
@@ -365,7 +382,38 @@ export default class Scene5Galaxy extends SceneBase {
   }
 
   update(dt, audio) {
-    const sdt = this.tick(dt, audio);
+    const P = PROFILE;
+    const perf = audio.perf;
+    const presence = audio.presence;
+    const follow = (v, to, tau) => v + (to - v) * (1 - Math.exp(-dt / tau));
+    const lerp = (a, b, x) => a + (b - a) * x;
+    const jumped = perf.jumpId !== this.jumpId; // a seek: settle into the new moment at once
+    this.jumpId = perf.jumpId;
+
+    // --- section state, blending into the next one ahead of the change
+    const now = P.STAGES[perf.stage] ?? P.STAGES.calm;
+    const next = perf.next ? P.STAGES[perf.next.stage] ?? now : now;
+    const x = perf.next ? Math.min(1, Math.max(0, 1 - perf.timeToNext / SCORE_CONFIG.LOOKAHEAD)) : 0;
+    const cross = x * x * (3 - 2 * x);
+    for (const k of Object.keys(this.stage)) {
+      const target = lerp(now[k], next[k], cross);
+      this.stage[k] = jumped ? target : follow(this.stage[k], target, P.STAGE_BLEND / 3);
+    }
+    const st = this.stage;
+
+    // --- build: the drive, slowly smoothed; the one value behind the whole galaxy
+    const B = P.BUILD;
+    const buildTarget = presence * Math.pow(perf.drive, B.CURVE);
+    this.build = jumped ? buildTarget : follow(this.build, buildTarget, buildTarget > this.build ? B.ATTACK : B.RELEASE);
+    this.climax = jumped ? perf.climax * presence : follow(this.climax, perf.climax * presence, 0.8);
+    const build = this.build;
+    const open = Math.max(st.pull * build, this.climax); // how far the view opens
+
+    // --- the clock: nearly still in quiet parts; with nothing playing, the old gentle idle
+    const speedTarget = lerp(0.4 + 1.3 * audio.energy, lerp(P.SPEED.STILL, P.SPEED.FULL, build) * st.speed, presence);
+    this.speed = jumped ? speedTarget : follow(this.speed, speedTarget, P.SPEED.SMOOTHING / 2);
+    const sdt = dt * this.speed;
+    this.time += sdt;
     const t = this.time;
     const s = this.shared;
     s.uTime.value = t;
@@ -377,14 +425,19 @@ export default class Scene5Galaxy extends SceneBase {
     this.rotation -= sdt * 0.045;
     this.galaxyUniforms.uRotation.value = this.rotation;
 
-    // beats launch shockwave rings from the core
-    if (audio.beatId !== this.lastBeat) {
-      this.lastBeat = audio.beatId;
-      if (this.waves.length >= 4) this.waves.shift();
-      this.waves.push({ r: 0.03, s: 0.7 + 0.5 * audio.energy });
+    // beats (the repeating pattern) launch shockwave rings from the core, none in the stillness
+    const R = P.RINGS;
+    if (perf.beatId !== this.lastBeat) {
+      this.lastBeat = perf.beatId;
+      const amp = lerp(0.7 + 0.5 * audio.energy, st.rings * lerp(R.STRENGTH[0], R.STRENGTH[1], build) * Math.min(1, Math.max(0, (perf.drive - R.MIN_DRIVE) / (1 - R.MIN_DRIVE)) * 2), presence);
+      if (amp > 0.05) {
+        if (this.waves.length >= 4) this.waves.shift();
+        this.waves.push({ r: 0.03, s: amp });
+      }
     }
+    const ringSpeed = lerp(0.32 + 0.3 * audio.energy, lerp(R.SPEED[0], R.SPEED[1], build), presence);
     for (const w of this.waves) {
-      w.r += dt * (0.32 + 0.3 * audio.energy);
+      w.r += dt * ringSpeed;
       w.s *= Math.exp(-dt * 0.8);
     }
     this.waves = this.waves.filter((w) => w.r < 1.4 && w.s > 0.02);
@@ -394,12 +447,24 @@ export default class Scene5Galaxy extends SceneBase {
       wu[i].set(w ? w.r : 10, w ? w.s : 0, 0, 0);
     }
 
-    this.coreUniforms.uIntensity.value = 0.45 + audio.bass * 0.8 + audio.beat * 0.25;
+    // --- light: core glow, bloom, exposure and star density follow the build; the climax flares
+    const C = P.CORE;
+    const core = (lerp(C.QUIET, C.FULL, build) * st.core + C.CLIMAX * this.climax + C.BASS * audio.bass * presence) * (1 + 0.25 * audio.beat * presence);
+    this.coreUniforms.uIntensity.value = lerp(0.45 + audio.bass * 0.8 + audio.beat * 0.25, core, presence);
+    this.bloom.strength = lerp(0.75, lerp(P.BLOOM.QUIET, P.BLOOM.FULL, build) + P.BLOOM.CLIMAX * this.climax, presence);
+    this.exposure = lerp(1, lerp(P.EXPOSURE.QUIET, P.EXPOSURE.FULL, build) + P.EXPOSURE.CLIMAX * this.climax, presence);
+    const share = lerp(1, lerp(P.STARS.QUIET, P.STARS.FULL, Math.max(build, this.climax)), presence);
+    if (Math.abs(share - this.starShare) > 0.002) {
+      this.starShare = share;
+      this._applyQuality();
+    }
 
-    // slow orbit with gentle drift; energy speeds it via the scene clock
+    // --- camera: a slow orbit; the music pulls it back and up, opening the view at the climax
+    const Cam = P.CAMERA;
+    this.pull = jumped ? open * presence : follow(this.pull, open * presence, Cam.SMOOTHING);
     const az = t * 0.05 + 0.6;
-    const el = 0.4 + 0.13 * Math.sin(t * 0.043);
-    const dist = (17 + 2.2 * Math.sin(t * 0.031)) * (this.distScale ?? 1);
+    const el = 0.4 + 0.13 * Math.sin(t * 0.043) + Cam.RISE * this.pull;
+    const dist = (17 + 2.2 * Math.sin(t * 0.031)) * (this.distScale ?? 1) * (1 + Cam.PULL * this.pull);
     const cam = this.camera;
     cam.position.set(Math.sin(az) * Math.cos(el) * dist, Math.sin(el) * dist, Math.cos(az) * Math.cos(el) * dist);
 
@@ -425,7 +490,20 @@ export default class Scene5Galaxy extends SceneBase {
     this.bloom.render(r, this.sceneTarget.texture, target);
   }
 
+  /** Live values for the debug overlay (D). */
+  get debug() {
+    const st = this.stage;
+    return {
+      'speed ×': this.speed.toFixed(2),
+      build: `${this.build.toFixed(2)} · climax ${this.climax.toFixed(2)} · pull ${this.pull.toFixed(2)}`,
+      light: `core ${this.coreUniforms.uIntensity.value.toFixed(2)} · bloom ${this.bloom.strength.toFixed(2)} · exposure ${this.exposure.toFixed(2)}`,
+      stars: `${(this.starShare * 100).toFixed(0)} %`,
+      state: `speed ${st.speed.toFixed(2)} · core ${st.core.toFixed(2)} · rings ${st.rings.toFixed(2)}`,
+    };
+  }
+
   dispose() {
+    this.tune?.dispose();
     for (const d of this.disposables ?? []) d.dispose();
     this.sceneTarget?.dispose();
     this.bloom?.dispose();

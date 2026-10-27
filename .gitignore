@@ -1,6 +1,8 @@
 # dependencies and build output
 node_modules/
 dist/
+# screenshots from npm run verify
+.verify/
 
 # environment and secrets
 .env*
@@ -32,3 +34,5 @@ Thumbs.db
 # without one the scene renders fully procedurally.
 public/textures/*
 !public/textures/.gitkeep
+# The Starry Night (Van Gogh, 1889) is public domain: the reference for scene 2
+!public/textures/starry-night.jpg
