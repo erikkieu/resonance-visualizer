@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
  * Exposes the files found in a /public folder as a virtual module, so the app
  * can discover them without probing URLs (which would log 404s in the console
  * when a file is missing):
- *   virtual:texture-plates  optional photo plates in /public/textures (Scene 4, Scene 3's reference)
+ *   virtual:texture-plates  optional photo plates in /public/textures (Scene 3's reference)
  *   virtual:music-library   the pieces in /public/Music and their analyses in /public/analysis
  */
 function folderListing(name, id, folders) {
