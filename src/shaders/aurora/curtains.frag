@@ -72,7 +72,8 @@ void main() {
 
   // a faint, patchy glow keeps every curtain alive between the waves
   float patchy = smoothstep(0.35, 0.9, vnoise(vec2(x * 0.06 + t * 0.03, fk * 5.0)));
-  float light = uGlow * (0.25 + 0.75 * patchy) + pick(uRowBright, fk) * w;
+  // (mostly continuous: the waves run along an unbroken curtain)
+  float light = uGlow * (0.6 + 0.4 * patchy) + pick(uRowBright, fk) * w;
   // vertical rays: fine for the melody, broad and gentle for the low layer
   float rays = vnoise(vec2(x * pick(uRowStria, fk) - t * 0.25, fk * 3.0 + t * 0.05));
   rays = mix(1.0, 0.25 + 1.1 * rays * rays, 0.55 + 0.25 * uTreble);

@@ -85,7 +85,7 @@ export const PROFILE = {
       HEIGHT: [0.7, 1.05], // × curtain height (also the profile's HEIGHT)
       FOLD: [0.35, 1.0], // ripple amplitude of the curtains
     },
-    GLOW: 0.08, // faint light along every curtain without packets (× amplitude): never empty
+    GLOW: 0.18, // faint light along every curtain without packets (× amplitude): never empty
     BLEND: 'add', // how crossing layers combine: 'add' or 'screen' (softer where both are bright)
     CAP: 0.95, // per-pixel brightness cap (HDR, soft knee): the aurora never washes out the scene
     KEY_BIAS: { minor: 0.08, major: -0.08 }, // ramp shift: minor cooler (bluer), major greener
@@ -102,7 +102,7 @@ export const PROFILE = {
       START: [-0.12, 0.25], // screen x where packets enter (random within)
       SPEED: 0.07, // screen widths per second (× SCALE.SPEED)
       PITCH_SPEED: 0, // higher notes travel this much faster (share)
-      WIDTH: [0.1, 0.22], // packet width at birth -> at the end of its life (it widens as it travels)
+      WIDTH: [0.16, 0.32], // packet width at birth -> at the end of its life (it widens as it travels)
       FRONT: 0.85, // leading edge width (× WIDTH): < 1 = a crisper front
       LIFE: 9, // s
       FADE_IN: 0.3, // s (raised cosine), peaking on the note
@@ -136,7 +136,7 @@ export const PROFILE = {
       START: [0.8, 1.1],
       SPEED: 0.16,
       PITCH_SPEED: 0.35, // the highest notes travel 35 % faster than the lowest
-      WIDTH: [0.045, 0.11],
+      WIDTH: [0.08, 0.18],
       FRONT: 0.45, // a crisp leading edge
       LIFE: 5,
       FADE_IN: 0.15,
@@ -165,12 +165,12 @@ export const PROFILE = {
     // painterly rendering of the aurora (landscape.frag): short directional brush strokes
     // along long arcs that sweep around a centre above the sky, with impasto highlights
     PAINT: {
-      STROKE: 0.6, // 0 = smooth light, 1 = fully broken into strokes
+      STROKE: 0, // 0 = smooth, continuous light (user: no individual strokes), 1 = fully broken into strokes
       LENGTH: 0.075, // stroke length (screen heights)
       WIDTH: 0.012, // stroke width (screen heights)
-      SMEAR: 0.016, // the light is dragged this far along the stroke (screen heights)
-      IMPASTO: 0.35, // whitish highlight on the ridge of bright strokes
-      SKY: 0.1, // the bare sky gets a faint stroke texture too
+      SMEAR: 0, // the light is dragged this far along the stroke (screen heights)
+      IMPASTO: 0, // whitish highlight on the ridge of bright strokes
+      SKY: 0, // the bare sky gets a faint stroke texture too
       CENTRE: [0.5, 1.5], // swirl centre the strokes curve around (screen x, height)
     },
   },

@@ -71,6 +71,14 @@ vec3 brush(vec2 uv, out vec2 dir) {
 }
 
 vec3 paintedAurora(vec2 uv, out float stroke) {
+  stroke = 0.5;
+  if (uPaint.x <= 0.0 && uPaint2.x <= 0.0) {
+    // painting off: smooth, continuous light (a soft blur hides the volume march's jitter grain)
+    vec2 o = 2.5 / uResolution;
+    return 0.4 * texture2D(tAurora, uv).rgb
+         + 0.15 * (texture2D(tAurora, uv + vec2(o.x, o.y)).rgb + texture2D(tAurora, uv + vec2(-o.x, o.y)).rgb
+                 + texture2D(tAurora, uv + vec2(o.x, -o.y)).rgb + texture2D(tAurora, uv - o).rgb);
+  }
   vec2 dir;
   vec3 b = brush(uv, dir);
   stroke = b.x;
