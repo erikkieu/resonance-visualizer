@@ -55,8 +55,12 @@ import curtainsFrag from '../shaders/aurora/curtains.frag?raw';
  * the rays are long, low-contrast and advected along the curtains, the
  * aurora layer gets a stable tent blur and the final dither is fixed and
  * under 1/255. N toggles the previous look for comparison.
+ * The look follows public/textures/aurora-reference.jpg (PROFILE.LOOK): pale
+ * mint rays fanning down from the upper sky, a hazy teal sky, dark cloud
+ * banks with warm peach rims (C), a V-shaped fjord, glassy water and a
+ * Viking longship (B) with warm lanterns, under a filmic grade.
  * Keys: A fades the whole aurora out and in, L the low layer, M the melody,
- * N clean / previous look.
+ * N clean / previous look, C clouds, B the ship.
  */
 
 const AU = PROFILE.AURORA;
@@ -76,6 +80,12 @@ const SLOTS = 12;
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 const NI = PROFILE.NIGHT;
+const LK = PROFILE.LOOK;
+// sRGB hex -> linear RGB (unnormalised, for scene colours)
+const lin = (hex) => {
+  const c = new THREE.Color(hex);
+  return new THREE.Vector3(c.r, c.g, c.b);
+};
 
 /**
  * Monotone cubic (Fritsch-Carlson) through the keyframes: smooth, and never
@@ -157,6 +167,13 @@ export default class Scene2Aurora extends SceneBase {
     this.jitterIn = 0; // mean per-frame change of the raw audio values (debug)
     this.jitterOut = 0; // ... of what the aurora gets
     this.hideStars = false; // verify: measure the aurora alone
+    // the look (PROFILE.LOOK): C toggles the clouds, B the ship (0.4 s fades)
+    this.cloudsOn = LK.CLOUDS.ON ? 1 : 0;
+    this.cloudsTarget = this.cloudsOn;
+    this.shipOn = LK.SHIP.ON ? 1 : 0;
+    this.shipTarget = this.shipOn;
+    this.melGlow = 0; // melody activity, smoothed (ship lights)
+    this.rippleKick = 0; // strong melody notes -> extra rings
     this.on = 1; // A toggles the aurora, L and M one layer each
     this.onTarget = 1;
     this._onKey = (e) => {
@@ -165,6 +182,8 @@ export default class Scene2Aurora extends SceneBase {
       const k = e.key.toLowerCase();
       if (k === 'a') this.onTarget = this.onTarget > 0 ? 0 : 1;
       if (k === 'n') this.clean = !this.clean;
+      if (k === 'c') this.cloudsTarget = this.cloudsTarget > 0 ? 0 : 1;
+      if (k === 'b') this.shipTarget = this.shipTarget > 0 ? 0 : 1;
       const l = k === 'l' ? this.layers.low : k === 'm' ? this.layers.melody : null;
       if (l) l.onTarget = l.onTarget > 0 ? 0 : 1;
     };
@@ -218,11 +237,13 @@ export default class Scene2Aurora extends SceneBase {
         uCap: { value: AU.CAP },
         uOn: { value: 1 },
         uNoise: { value: new THREE.Vector2(1, 1) },
+        uRays: { value: new THREE.Vector4(LK.RAYS.BASE, LK.RAYS.TALL, LK.RAYS.LOW_EDGE, LK.RAYS.FADE) },
+        uRays2: { value: new THREE.Vector2(LK.RAYS.CORE, 1) },
       },
     });
     this.landMat = passMaterial({
       fragmentShader: prefix + landscapeFrag,
-      uniforms: { ...this.shared, tAurora: { value: null }, tTerrain: { value: null }, tAmbient: { value: null }, uPaint: { value: new THREE.Vector4() }, uPaint2: { value: new THREE.Vector4() }, uAuroraBlur: { value: new THREE.Vector2(2.5, 0) }, ...this._nightUniforms() },
+      uniforms: { ...this.shared, tAurora: { value: null }, tTerrain: { value: null }, tAmbient: { value: null }, uPaint: { value: new THREE.Vector4() }, uPaint2: { value: new THREE.Vector4() }, uAuroraBlur: { value: new THREE.Vector2(2.5, 0) }, ...this._nightUniforms(), ...this._lookUniforms() },
     });
     this.terrainMat = passMaterial({ fragmentShader: prefix + terrainFrag, uniforms: { ...this.shared } });
     this.ambientMat = passMaterial({ fragmentShader: ambientFrag, uniforms: { tAurora: { value: null } } });
@@ -241,11 +262,12 @@ export default class Scene2Aurora extends SceneBase {
         uRowStria: { value: new THREE.Vector4() },
         uGlow: { value: 0 },
         uRay: { value: new THREE.Vector4(1, 1, 0.55, 0.25) },
+        uRowZ: { value: new THREE.Vector4(...LK.RAYS.DEPTH) },
       },
     });
     this.curtainTarget = createTarget(4096, 4);
     this.auroraMat.uniforms.tCurtains.value = this.curtainTarget.texture;
-    this.bloom = new Bloom({ levels: 5, threshold: 0.35, knee: 0.3, strength: 0.9, radius: 1.0 });
+    this.bloom = new Bloom({ levels: 5, threshold: LK.GRADE.BLOOM.THRESHOLD, knee: 0.3, strength: LK.GRADE.BLOOM.STRENGTH, radius: 1.0 });
     await this.pass.compile(renderer, [this.auroraMat, this.landMat, this.terrainMat, this.ambientMat, this.curtainMat]);
     this.tune = createTunePanel({ title: 'Aurora · Ständchen', storageKey: 'resonance.tune.aurora', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
   }
@@ -354,6 +376,7 @@ export default class Scene2Aurora extends SceneBase {
     this.on = follow(this.on, this.onTarget, 0.25);
     this._writeAurora(wave(W.HEIGHT), dt, jumped);
     this._writeNoise();
+    this._writeLook(dt, perf);
 
     const s = this.shared;
     const sm = this._smoothAudio(dt, audio, jumped);
@@ -409,11 +432,102 @@ export default class Scene2Aurora extends SceneBase {
   _writeNoise() {
     const N = AU.NOISE;
     const c = this.clean;
-    this.curtainMat.uniforms.uRay.value.set(c ? N.OCTAVES : 1, c ? N.FREQUENCY : 1, c ? N.RAY_CONTRAST : 0.55, c ? N.SHIMMER.AMP : 0.25);
+    const st = PROFILE.LOOK.RAYS.STRIATION; // the look's streaks (smooth stripes, not noise)
+    this.curtainMat.uniforms.uRay.value.set(c ? N.OCTAVES : 1, c ? st.FREQUENCY : 1, c ? st.CONTRAST : 0.55, c ? N.SHIMMER.AMP : 0.25);
     this.auroraMat.uniforms.uNoise.value.set(c ? N.EDGE : 1, c ? 1 : 0);
     this.landMat.uniforms.uAuroraBlur.value.set(c ? N.BLUR : 2.5, c ? 1 : 0);
     this.dither = c ? N.DITHER : 1;
     this.ditherAnimated = !c;
+  }
+
+  // ------------------------------------------------------------ the look (reference restyle)
+
+  _lookUniforms() {
+    const v4 = () => ({ value: new THREE.Vector4() });
+    const C = LK.CLOUDS;
+    return {
+      uClock: { value: 0 },
+      uFan: v4(),
+      uSkyLook: v4(),
+      uHazeCol: { value: lin(LK.SKY.HAZE.COLOR) },
+      uStarLook: v4(),
+      uCloud: v4(),
+      uCloud2: v4(),
+      uCloud3: v4(),
+      uCloudLight: v4(),
+      uCloudBody: { value: lin(C.BODY) },
+      uCloudRim0: { value: lin(C.RIM[0]) },
+      uCloudRim1: { value: lin(C.RIM[1]) },
+      uRock: { value: lin(LK.MOUNTAINS.ROCK) },
+      uSnow: { value: lin(LK.MOUNTAINS.SNOW) },
+      uMount: v4(),
+      uWaterLook: v4(),
+      uWaterDark: { value: lin(LK.WATER.DARK) },
+      uShip: v4(),
+      uShip2: v4(),
+      uShip3: v4(),
+      uHull: { value: lin(LK.SHIP.HULL) },
+      uSail: { value: lin(LK.SHIP.SAIL) },
+      uShipLight: { value: lin(LK.SHIP.LIGHT) },
+      uGrade: v4(),
+      uLift: { value: lin(LK.GRADE.LIFT) },
+    };
+  }
+
+  /** The look's per-frame values: ray fan and sway, sky, clouds, water, ship, grade. */
+  _writeLook(dt, perf) {
+    const u = this.landMat.uniforms;
+    const R = LK.RAYS;
+    const C = LK.CLOUDS;
+    const S = LK.SHIP;
+    const W = LK.WATER;
+    const t = this.realTime;
+    const k = (tau) => 1 - Math.exp(-dt / tau);
+    this.cloudsOn += (this.cloudsTarget - this.cloudsOn) * k(0.4);
+    this.shipOn += (this.shipTarget - this.shipOn) * k(0.4);
+    // melody activity -> the ship's lights; strong notes -> rings
+    const mel = this.layers.melody.packets.reduce((s, p) => s + p.strength * this._envelope(p, AU.MELODY), 0);
+    this.melGlow += (Math.min(1, mel / 2) - this.melGlow) * k(0.6);
+    this.rippleKick *= Math.exp(-dt / 2);
+    const bass = this.smooth.bass;
+
+    // the rays: fan, slow sway, streaks; pale, the climax opening the colour
+    const clean = this.clean;
+    u.uFan.value.set(clean ? R.FAN : 0, R.FAN_CENTRE, R.SWAY.AMP * Math.sin(2 * Math.PI * R.SWAY.RATE * t), clean ? R.STREAK : AU.NOISE.BLUR);
+    const au = this.auroraMat.uniforms;
+    au.uRays.value.set(R.BASE, R.TALL, R.LOW_EDGE, R.FADE);
+    au.uRays2.value.set(R.CORE, lerp(R.SATURATION[0], R.SATURATION[1], this.climax));
+    this.curtainMat.uniforms.uRowZ.value.set(...R.DEPTH);
+
+    u.uClock.value = t;
+    u.uSkyLook.value.set(LK.SKY.WASH, LK.SKY.HAZE.STRENGTH, LK.SKY.HAZE.HEIGHT, LK.SKY.SHORE_GLOW);
+    u.uHazeCol.value.copy(lin(LK.SKY.HAZE.COLOR));
+    u.uStarLook.value.set(LK.STARS.DENSITY, LK.STARS.SIZE, LK.STARS.BEHIND_AURORA, 0);
+    // clouds: drift per bank, warm rims brighten with the bass and toward dawn
+    u.uCloud.value.set(this.cloudsOn, C.SCALE, C.COVER + (1 - this.cloudsOn) * 0.6, C.SOFT);
+    u.uCloud2.value.set(C.SIDES[0], C.SIDES[1], C.BAND[0], C.BAND[1]);
+    u.uCloud3.value.set(C.AURORA_TINT, C.RIM_STRENGTH * (1 + C.BASS_GAIN * bass + C.DAWN_GAIN * this.dawn) * this.cloudsOn, C.RIM_WIDTH, 0);
+    u.uCloudLight.value.set(C.LIGHT[0], C.LIGHT[1], t * C.DRIFT[0] * C.SCALE, -t * C.DRIFT[1] * C.SCALE);
+    u.uCloudBody.value.copy(lin(C.BODY));
+    u.uCloudRim0.value.copy(lin(C.RIM[0]));
+    u.uCloudRim1.value.copy(lin(C.RIM[1]));
+    const M = LK.MOUNTAINS;
+    u.uMount.value.set(M.HAZE[0], M.HAZE[1], M.HAZE[2], M.SKY_LIGHT);
+    u.uWaterLook.value.set(W.RIPPLE, W.FINE, W.RINGS + W.NOTE_RINGS * this.rippleKick, W.ROCKS ? 1 : 0);
+    // the ship: a very slow drift across the fjord (piece time, so a seek puts it in place), bob, roll, billow
+    const minutes = (perf.source === 'score' ? perf.t : t % 360) / 60;
+    const bob = S.BOB * (Math.sin(t * 0.55) + 0.5 * Math.sin(t * 0.93 + 1));
+    u.uShip.value.set(S.X - S.DRIFT * minutes, S.WATERLINE, S.SIZE, this.shipOn);
+    u.uShip2.value.set(bob, S.ROLL * Math.sin(t * 0.42), lerp(S.BILLOW[0], S.BILLOW[1], bass), S.LIGHT_STRENGTH * (1 + S.MELODY_GAIN * this.melGlow));
+    u.uShip3.value.set(S.SAIL_LIGHT, S.FLICKER, 0, 0);
+    u.uHull.value.copy(lin(S.HULL));
+    u.uSail.value.copy(lin(S.SAIL));
+    u.uShipLight.value.copy(lin(S.LIGHT));
+    const G = LK.GRADE;
+    u.uGrade.value.set(G.SATURATION, G.WARM_KEEP, G.VIGNETTE, 0);
+    u.uLift.value.copy(lin(G.LIFT));
+    this.bloom.threshold = G.BLOOM.THRESHOLD;
+    this.bloom.strength = G.BLOOM.STRENGTH;
   }
 
   // ------------------------------------------------------------ the night progression
@@ -595,7 +709,13 @@ export default class Scene2Aurora extends SceneBase {
     // clean: a packet differs from the last one by at most STEP, so fast notes form a stream, not a strobe
     if (this.clean && layer.lastStrength !== undefined) strength = Math.min(layer.lastStrength + NS.STEP, Math.max(layer.lastStrength - NS.STEP, strength));
     layer.lastStrength = strength;
-    const hue = clamp01(lerp(L.HUE_RANGE[0], L.HUE_RANGE[1], h) + this.keyBias);
+    let hue = clamp01(lerp(L.HUE_RANGE[0], L.HUE_RANGE[1], h) + this.keyBias);
+    if (name === 'melody') {
+      // quiet notes stay near the mint centre; the climax opens up the whole ramp
+      const R = LK.RAYS;
+      hue = clamp01(R.HUE_CENTRE + (hue - R.HUE_CENTRE) * lerp(R.HUE_SPREAD[0], R.HUE_SPREAD[1], this.climax));
+      if (e.strength > 0.6) this.rippleKick = Math.min(1, this.rippleKick + 0.5 * e.strength);
+    }
     const p = {
       id: this.nextId++,
       age: 0, // score notes: the fade-in peaks on the note; live ones (in = 0) peak FADE_IN late
@@ -626,7 +746,7 @@ export default class Scene2Aurora extends SceneBase {
     const cu = this.curtainMat.uniforms;
     const au = this.auroraMat.uniforms;
     const S = AU.SCALE;
-    const bright = lerp(S.BRIGHT[0], S.BRIGHT[1], this.amp) * (this.clean ? AU.NOISE.GAIN : 1);
+    const bright = lerp(S.BRIGHT[0], S.BRIGHT[1], this.amp) * (this.clean ? AU.NOISE.GAIN : 1) * PROFILE.LOOK.RAYS.GAIN;
     LAYERS.forEach((name, li) => {
       const L = AU[name.toUpperCase()];
       const layer = this.layers[name];
@@ -656,7 +776,7 @@ export default class Scene2Aurora extends SceneBase {
     cu.uRowBend.value.set(M.BEND, M.BEND, L.BEND, L.BEND);
     cu.uRowCurve.value.set(M.CURVE, M.CURVE, L.CURVE, L.CURVE);
     cu.uRowStria.value.set(M.STRIATION, M.STRIATION * 0.85, L.STRIATION, L.STRIATION * 0.85);
-    cu.uGlow.value = AU.GLOW * this.amp * (this.clean ? AU.NOISE.GAIN : 1);
+    cu.uGlow.value = AU.GLOW * this.amp * (this.clean ? AU.NOISE.GAIN : 1) * PROFILE.LOOK.RAYS.GAIN;
     au.uRowSheet.value.set(M.SHEET, M.SHEET, L.SHEET, L.SHEET);
     au.uHueRot.value.set(mel.rot, mel.rot, low.rot, low.rot);
     au.uCrest.value = AU.CREST;
@@ -732,6 +852,7 @@ export default class Scene2Aurora extends SceneBase {
       melody: { html: `${sw(this._rampHex(AU.MELODY.RAMP, mel.hue, mel.rot))} height ${(v?.melody.height ?? 0).toFixed(2)} · hue ${mel.hue.toFixed(2)} · ${(v?.melody.rate ?? 0).toFixed(1)} notes/s · spawned ${mel.spawned}/${mel.heard}` },
       'low note': { html: `${sw(this._rampHex(AU.LOW.RAMP, low.hue, low.rot))} ${v && v.low.note >= 0 ? names[v.low.note] : '-'} · height ${(v?.low.height ?? 0).toFixed(2)} · ${(v?.low.rate ?? 0).toFixed(1)} notes/s · spawned ${low.spawned}/${low.heard}` },
       voices: perf ? { html: this._voiceStrip(perf) + ' <span style="color:#b98cff">melody</span> / <span style="color:#2fd39a">low</span>' } : '-',
+      look: `clouds ${this.cloudsTarget > 0 ? 'on' : 'OFF'} (C) · ship ${this.shipTarget > 0 ? 'on' : 'OFF'} (B) x ${this.landMat.uniforms.uShip.value.x.toFixed(3)} · lights ${this.landMat.uniforms.uShip2.value.w.toFixed(2)} · rays fan ${LK.RAYS.FAN} · sat ${this.auroraMat.uniforms.uRays2.value.y.toFixed(2)} · haze ${LK.SKY.HAZE.STRENGTH}`,
       smoothness: `${this.clean ? 'clean' : 'PREVIOUS look'} (N) · audio jitter ${(this.jitterIn * 1000).toFixed(1)} -> ${(this.jitterOut * 1000).toFixed(1)} ‰/frame (${this.jitterIn > 0 ? Math.round((1 - this.jitterOut / this.jitterIn) * 100) : 0} % less) · blur ${this.landMat.uniforms.uAuroraBlur.value.x} px · rays ${this.curtainMat.uniforms.uRay.value.x} oct`,
       night: { html: `${sw(this._horizonHex())} night ${this.night.toFixed(2)} · dawn ${this.dawn.toFixed(2)} · ${this.nightSource === 'score' ? 'timeline' : `loop ${NI.LOOP} s`}` },
       'speed ×': this.speed.toFixed(2),

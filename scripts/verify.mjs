@@ -52,6 +52,15 @@
  * |Laplacian| of the luminance, plus mean luminance, chroma and the p98
  * highlight (each look twice, A B B A, averaged). Checks both drop >= 40 % while luminance, chroma and highlights
  * stay within 10 %; then shoots 2:40, 4:50 and 5:50 in the clean look.
+ *
+ *   npm run verify -- standchen --look [--out dir]
+ *
+ * checks Scene 2's restyle toward public/textures/aurora-reference.jpg: at
+ * LOOK_TIMES, from a screenshot, the dominant hue (OKLCH, chroma-weighted)
+ * and mean HSV saturation of the aurora (the brightest 30 % of the sky
+ * pixels), the share of warm pixels (peach / salmon / orange, OKLCH hue
+ * 20-80°) in the sky (the cloud rims, aim 2-8 %), mean luminance and fps;
+ * screenshots at LOOK_SHOTS. Run it before a change for a baseline.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -78,6 +87,9 @@ const AURORA_SHOTS = [10, 80, 160, 260, 290, 350];
 const AURORA_SEQ = 75; // s: 5 frames over 1 s of the 1:04 swell's melody
 const AURORA_QUIET = [10, 205, 350]; // intro, the 3:20-3:35 release, the fade
 const AURORA_TRACE = [64, 84];
+const LOOK = args.includes('--look');
+const LOOK_TIMES = [10, 80, 160, 260, 290, 350]; // quiet, 1:20, mid, building, climax, fade
+const LOOK_SHOTS = [10, 160, 290, 350];
 const SMOOTH = args.includes('--smooth');
 const SMOOTH_WINDOWS = [[10, 'quiet'], [255, 'building'], [287, 'climax']].filter(([t]) => !flag('--windows') || flag('--windows').split(',').map(Number).includes(t)); // s, 5 s each (--windows 287 = only those)
 const SMOOTH_SHOTS = [160, 290, 350]; // s: 20 s of the 1:04 swell's melody: packets spawned against notes heard
@@ -186,6 +198,16 @@ async function verifyPiece(browser, url, piece) {
     const result = await auroraPass(page, dir, seekAndPlay, state, analysis);
     const fps = await page.evaluate(() => window.__resonance.fps);
     fs.writeFileSync(path.join(dir, 'aurora-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
+    console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
+    console.log(`  -> ${dir}`);
+    await page.close();
+    return;
+  }
+
+  if (LOOK) {
+    const result = await lookPass(page, dir, seekAndPlay);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    fs.writeFileSync(path.join(dir, 'look-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
     console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
     console.log(`  -> ${dir}`);
     await page.close();
@@ -497,6 +519,84 @@ async function auroraPass(page, dir, seekAndPlay, state, analysis) {
   console.log(`  (c) quiet (0:10, 3:25, 5:50) max activity ${quiet.toFixed(2)} vs 4:50 ${peak.toFixed(2)} -> ${ok(checks.quietLow)} low · ${ok(checks.peaksAtClimax)} peaks at 4:50 · 5:11 ${at(311).activity.toFixed(2)} (amp ${((at(311).amp / at(290).amp) * 100).toFixed(0)} %) -> ${ok(checks.lowerAfter)} lower · ${ok(checks.neverBlank)} never blank`);
   console.log(`  night: ${rows.map((r) => `${fmt(r.t)} ${r.night.toFixed(2)}/${r.dawn.toFixed(2)}`).join(' · ')} -> ${ok(checks.nightDeepens)} deepens to 4:50 · ${ok(checks.dawnAfter)} dawn after · ${ok(checks.nightTimeline)} from the timeline`);
   return { rows, span, travel: { checked: travel.checked, wrong: travel.wrong }, seq, checks };
+}
+
+/** Aurora hue / saturation, warm share of the sky and mean luminance of a screenshot (see --look). */
+async function lookStats(page, file) {
+  const png = await page.screenshot({ path: file ?? undefined });
+  return page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const W = 320;
+    const H = 180;
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0, W, H);
+    const px = g.getImageData(0, 0, W, H).data;
+    const lin = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    const sky = [];
+    let Ysum = 0;
+    for (let y = 0; y < H; y++)
+      for (let x = 0; x < W; x++) {
+        const i = 4 * (y * W + x);
+        const R = px[i] / 255;
+        const G = px[i + 1] / 255;
+        const B = px[i + 2] / 255;
+        const r = lin(R);
+        const gr = lin(G);
+        const b = lin(B);
+        const Y = 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+        Ysum += Y;
+        if (y >= H * 0.58) continue; // the sky: the top 58 % of the frame
+        const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * gr + 0.0514459929 * b);
+        const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * gr + 0.1073969566 * b);
+        const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * gr + 0.6299787005 * b);
+        const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+        const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+        const Bk = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+        const mx = Math.max(R, G, B);
+        sky.push({ Y, L, C: Math.hypot(A, Bk), h: ((Math.atan2(Bk, A) * 180) / Math.PI + 360) % 360, sat: mx > 0 ? (mx - Math.min(R, G, B)) / mx : 0 });
+      }
+    // the aurora: the brightest 30 % of the sky
+    const byY = sky.map((p) => p.Y).sort((a, b) => a - b);
+    const cut = byY[Math.floor(byY.length * 0.7)];
+    const aur = sky.filter((p) => p.Y >= cut);
+    const bins = new Float32Array(36);
+    let sat = 0;
+    for (const p of aur) {
+      sat += p.sat;
+      if (p.C > 0.02) bins[Math.floor(p.h / 10)] += p.C;
+    }
+    let top = 0;
+    for (let i = 1; i < 36; i++) if (bins[i] > bins[top]) top = i;
+    const warm = sky.filter((p) => p.h >= 20 && p.h <= 80 && p.C > 0.035 && p.L > 0.3).length / sky.length;
+    return { hue: top * 10 + 5, sat: sat / aur.length, chroma: aur.reduce((s, p) => s + p.C, 0) / aur.length, warm, lum: Ysum / (W * H) };
+  }, png.toString('base64'));
+}
+
+async function lookPass(page, dir, seekAndPlay) {
+  const playTo = (t) => page.waitForFunction((t) => window.__resonance.perf.t >= t, t, { timeout: 120000, polling: 50 });
+  const rows = [];
+  console.log('    time   aurora hue  sat    chroma  warm sky  lum     fps');
+  let prev = -Infinity;
+  for (const t of LOOK_TIMES) {
+    if (t - prev < 30) await playTo(t);
+    else await seekAndPlay(t);
+    prev = t;
+    const file = LOOK_SHOTS.includes(t) ? path.join(dir, `look-${fmt(t).replace(':', 'm')}.png`) : null;
+    const f = await lookStats(page, file);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    rows.push({ t, ...f, fps, file });
+    console.log(`  ${fmt(t).padStart(7)}  ${String(f.hue).padStart(4)}°      ${f.sat.toFixed(3)}  ${f.chroma.toFixed(3)}   ${(f.warm * 100).toFixed(1).padStart(5)} %   ${f.lum.toFixed(4)}  ${fps.toFixed(0)}${file ? '  [shot]' : ''}`);
+  }
+  const mint = rows.filter((r) => r.hue >= 150 && r.hue <= 205).length;
+  const meanSat = rows.reduce((s, r) => s + r.sat, 0) / rows.length;
+  const warmOk = rows.filter((r) => r.warm >= 0.02 && r.warm <= 0.08).length;
+  console.log(`  aurora hue mint-teal (150-205°) in ${mint}/${rows.length} · mean saturation ${meanSat.toFixed(3)} · warm cloud rims 2-8 % in ${warmOk}/${rows.length}`);
+  return { rows, meanSat, mint, warmOk };
 }
 
 /**

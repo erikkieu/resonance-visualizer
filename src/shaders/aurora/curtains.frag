@@ -29,10 +29,9 @@ uniform vec4 uRowCurve;    // the curtain's arc (map units at the screen edges)
 uniform vec4 uRowStria;    // vertical ray frequency
 uniform float uGlow;       // faint light along every curtain (x amplitude)
 uniform float uTopScale;   // height the slices cover (tallest possible curtain)
+uniform vec4 uRowZ;        // distance of each curtain (LOOK.RAYS.DEPTH)
 uniform vec4 uRay;         // x = octaves, y = frequency (× uRowStria), z = contrast, w = treble -> contrast
 varying vec2 vUv;
-
-const vec4 ROW_Z = vec4(7.5, 11.5, 16.0, 22.0);
 
 float pick(vec4 v, float k) {
   return k < 0.5 ? v.x : k < 1.5 ? v.y : k < 2.5 ? v.z : v.w;
@@ -43,7 +42,7 @@ void main() {
   float fk = floor(vUv.y * 4.0);
   float t = uTime;
 
-  float base = pick(ROW_Z, fk);
+  float base = pick(uRowZ, fk);
   // where this point of the curtain appears across the screen (0 = left edge)
   float su = 0.5 + x * FOCAL / (base * uAspect);
   float meander = 4.0 * (vnoise(vec2(x * 0.035 + fk * 9.1, t * 0.018 + fk)) - 0.5) * 2.0;

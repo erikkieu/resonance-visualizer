@@ -34,6 +34,8 @@ uniform float uScreen;            // 0 = the layers add, 1 = screen blend
 uniform float uTopScale;          // tallest possible curtain (relative height)
 uniform float uCap;
 uniform float uOn;                // 0..1, the A key fades the aurora out
+uniform vec4 uRays;               // x = ray bottom altitude, y = × slice span (tall rays), z = soft lower edge, w = fade toward the top
+uniform vec2 uRays2;              // x = white cores, y = saturation
 uniform vec2 uNoise;              // x = curtain edge softness, y = 1: slice jitter fixed in screen space (0: re-seeded every frame)
 varying vec2 vUv;
 
@@ -73,7 +75,7 @@ void main() {
 
   float t = uTime;
   // the slices cover the tallest curtain; bass swells the curtains gently
-  float topAlt = 2.3 * (1.0 + 0.3 * uBass) * uHeight * uTopScale;
+  float topAlt = 2.3 * (1.0 + 0.3 * uBass) * uHeight * uTopScale * uRays.y;
   float N = uSteps;
   // per-pixel jitter of the slice offsets hides banding between slices: a fixed
   // interleaved-gradient pattern (blue-noise-like, vanishes under the composite's blur),
@@ -102,7 +104,7 @@ void main() {
     float fi = float(i);
     if (fi >= N) break;
     float f = (fi + jitter) / N;               // 0 = base, 1 = top of the tallest curtain
-    float alt = 0.9 + f * topAlt;              // slice altitude above the eye
+    float alt = uRays.x + f * topAlt;          // slice altitude above the eye
     vec2 q = rd.xz * (alt / rd.y);             // where the ray crosses this slice
     if (q.y > 60.0) break;
 
@@ -118,13 +120,13 @@ void main() {
       float d = q.y - c.x;
       // thin sheet with a faint halo
       float glow = c.y * (w / we) * (exp(-d * d / (we * we)) + 0.04 * exp(-abs(d) * 2.5));
-      // colour: whitened bright lower edge -> ramp body -> crown further up the ramp
+      // colour: near-white core in the bright lower part -> ramp body -> crown further up the ramp
       vec3 body = ramp(c.a, mel);
-      vec3 col = mix(mix(body, vec3(1.0), 0.35), body, smoothstep(0.0, 0.08, lf));
+      vec3 col = mix(body, vec3(1.0), uRays2.x * (1.0 - smoothstep(0.02, 0.4, lf)) * smoothstep(0.1, 1.2, c.y));
       col = mix(col, ramp(c.a + uCrest, mel), smoothstep(0.35, 0.9, lf));
       col = hueRotate(col, rot[k]);
-      // bright at the base, fading up into the soft crown, gone above the curtain's top
-      float fade = (0.35 + 0.65 * smoothstep(0.0, 0.05, lf)) * exp(-lf * 2.6) * (1.0 - smoothstep(0.85, 1.25, lf));
+      // a soft lower edge, brightest in the lower-middle of the ray, fading smoothly up to its top
+      float fade = smoothstep(0.0, uRays.z, lf) * exp(-lf * uRays.w) * (1.0 - smoothstep(0.85, 1.25, lf));
       vec3 light = col * glow * fade * exp(-q.y * 0.035);
       if (mel) accMel += light;
       else accLow += light;
@@ -140,6 +142,7 @@ void main() {
   // where the layers cross their light adds up (screen: softer where both are bright)
   // (the screen term stays under min(mel, low), so the sum never drops below the brighter layer)
   vec3 col = accMel + accLow - uScreen * accMel * accLow / (accMel + accLow + 1e-4);
+  col = max(mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, uRays2.y), 0.0); // pale, desaturated (the climax opens it up)
   col *= smoothstep(0.0, 0.05, rd.y);
   // soft cap: bright pixels saturate toward uCap instead of clipping to white
   float m = max(max(col.r, col.g), col.b);

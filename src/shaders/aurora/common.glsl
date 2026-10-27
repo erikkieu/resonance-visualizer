@@ -23,7 +23,7 @@ uniform float uWarm;      // 0..1 the green body warms toward gold, the crown to
 uniform float uNight;     // 0 = late twilight .. 1 = deepest night
 uniform float uDawn;      // 0..1 the pre-dawn glow
 
-const float HORIZON = 0.36;
+const float HORIZON = 0.30; // (reference restyle: a lower horizon, more sky)
 const float FOCAL = 1.1;
 
 vec3 viewRay(vec2 uv) {
