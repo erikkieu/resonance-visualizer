@@ -22,8 +22,10 @@
  * JOURNEY_TIMES across the piece and prints, for each, the scene's journey
  * value, the frame's mean luminance (linear Y), mean Oklab lightness, the
  * dominant hue (chroma-weighted OKLCH histogram) and fps; screenshots only
- * JOURNEY_SHOTS; then checks that luminance falls overall, that the start is
- * clearly brighter than the end, and reports the bumps at the two climaxes.
+ * JOURNEY_SHOTS; then checks that the background (the darkest quarter of the
+ * frame) stays dark everywhere, that the swirls' hue moves from light blue /
+ * yellow toward blue / purple, that yellow splashes remain, and reports the
+ * bumps at the two climaxes.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -224,6 +226,7 @@ async function frameStats(page, file) {
     const px = g.getImageData(0, 0, c.width, c.height).data;
     const lin = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
     const bins = new Float32Array(36);
+    const ys = new Float32Array(px.length / 4);
     let Y = 0;
     let L = 0;
     let C = 0;
@@ -232,7 +235,9 @@ async function frameStats(page, file) {
       const r = lin(px[i] / 255);
       const gr = lin(px[i + 1] / 255);
       const b = lin(px[i + 2] / 255);
-      Y += 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+      const y = 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+      ys[i / 4] = y;
+      Y += y;
       const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * gr + 0.0514459929 * b);
       const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * gr + 0.1073969566 * b);
       const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * gr + 0.6299787005 * b);
@@ -244,16 +249,30 @@ async function frameStats(page, file) {
     }
     let top = 0;
     for (let i = 1; i < 36; i++) if (bins[i] > bins[top]) top = i;
+    // background = darkest quarter, swirls = brightest quarter; yellow = share of the colour in 70-110°
+    ys.sort();
+    const q = Math.floor(n / 4);
+    const avg = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+    const total = bins.reduce((s, v) => s + v, 0);
     const names = [[30, 'red'], [80, 'orange'], [105, 'yellow'], [160, 'green'], [215, 'cyan'], [265, 'blue'], [300, 'indigo'], [335, 'violet'], [360, 'red']];
     const hue = top * 10 + 5;
-    return { lum: Y / n, L: L / n, chroma: C / n, hue, hueName: bins[top] > 0 ? names.find(([h]) => hue < h)[1] : 'grey' };
+    return {
+      lum: Y / n,
+      dark: avg(ys.subarray(0, q)),
+      bright: avg(ys.subarray(n - q)),
+      L: L / n,
+      chroma: C / n,
+      hue,
+      hueName: bins[top] > 0 ? names.find(([h]) => hue < h)[1] : 'grey',
+      yellow: total > 0 ? (bins[7] + bins[8] + bins[9] + bins[10]) / total : 0,
+    };
   }, png.toString('base64'));
 }
 
 /** Scene 1's journey: numbers at JOURNEY_TIMES, screenshots at JOURNEY_SHOTS, trend checks. */
 async function journeyPass(page, dir, seekAndPlay, state) {
   const rows = [];
-  console.log('    time   journey  lum     L      chroma  hue            fps');
+  console.log('    time   journey  lum    ground  swirls  chroma  hue          yellow  fps');
   for (const t of JOURNEY_TIMES) {
     await seekAndPlay(t);
     const st = await state();
@@ -261,20 +280,21 @@ async function journeyPass(page, dir, seekAndPlay, state) {
     const file = JOURNEY_SHOTS.includes(t) ? path.join(dir, `journey-${fmt(t).replace(':', 'm')}.png`) : null;
     const f = await frameStats(page, file);
     rows.push({ t, journey, ...f, fps: st.fps, file });
-    console.log(`  ${fmt(t).padStart(7)}  ${journey.toFixed(3)}   ${f.lum.toFixed(3)}  ${f.L.toFixed(3)}  ${f.chroma.toFixed(3)}   ${String(f.hue).padStart(3)}° ${f.hueName.padEnd(7)}  ${st.fps.toFixed(0)}${file ? '  [shot]' : ''}`);
+    console.log(`  ${fmt(t).padStart(7)}  ${journey.toFixed(3)}   ${f.lum.toFixed(3)}  ${f.dark.toFixed(3)}   ${f.bright.toFixed(3)}   ${f.chroma.toFixed(3)}   ${String(f.hue).padStart(3)}° ${f.hueName.padEnd(7)}  ${(f.yellow * 100).toFixed(1).padStart(4)}%  ${st.fps.toFixed(0)}${file ? '  [shot]' : ''}`);
   }
-  // checks: overall fall (least-squares slope), start clearly brighter than the end, climax bumps
+  // checks: dark background throughout, swirl hue moves toward blue / purple, yellow remains, climax bumps
   const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
   const ts = rows.map((r) => r.t);
   const ls = rows.map((r) => r.lum);
   const mt = mean(ts);
   const ml = mean(ls);
   const slope = ts.reduce((s, t, i) => s + (t - mt) * (ls[i] - ml), 0) / ts.reduce((s, t) => s + (t - mt) ** 2, 0);
-  const start = mean(ls.slice(0, 2));
-  const end = mean(ls.slice(-2));
+  const hueStart = mean(rows.slice(0, 3).map((r) => r.hue));
+  const hueEnd = mean(rows.slice(-3).map((r) => r.hue));
   const checks = {
-    falls: slope < 0,
-    startBrighter: start > end * 2.5,
+    darkGround: rows.every((r) => r.dark < 0.04), // the bare navy ground itself measures ~0.015
+    hueShift: hueEnd - hueStart > 20,
+    yellowStays: rows.slice(-4).some((r) => r.yellow > 0.005),
     bumps: JOURNEY_CLIMAXES.map((c) => {
       const i = ts.indexOf(c);
       const r = rows[i];
@@ -283,8 +303,10 @@ async function journeyPass(page, dir, seekAndPlay, state) {
       return { t: c, lum: r.lum, neighbours: expected, bump: r.lum - expected };
     }),
   };
-  console.log(`  luminance slope ${(slope * 60).toFixed(4)} / min  -> ${checks.falls ? 'PASS falls overall' : 'FAIL does not fall'}`);
-  console.log(`  start ${start.toFixed(3)} vs end ${end.toFixed(3)} (×${(start / Math.max(end, 1e-4)).toFixed(1)})  -> ${checks.startBrighter ? 'PASS start clearly brighter' : 'FAIL start not clearly brighter'}`);
+  console.log(`  ground (darkest 25 %) max ${Math.max(...rows.map((r) => r.dark)).toFixed(3)}  -> ${checks.darkGround ? 'PASS background dark throughout' : 'FAIL background gets light'}`);
+  console.log(`  swirl hue ${hueStart.toFixed(0)}° (start) -> ${hueEnd.toFixed(0)}° (end)  -> ${checks.hueShift ? 'PASS moves toward blue / purple' : 'FAIL hue does not move'}`);
+  console.log(`  yellow in the last 4 samples ${rows.slice(-4).map((r) => (r.yellow * 100).toFixed(1) + '%').join(' ')}  -> ${checks.yellowStays ? 'PASS yellow splashes remain' : 'FAIL no yellow late'}`);
+  console.log(`  mean luminance slope ${(slope * 60).toFixed(4)} / min (info)`);
   for (const b of checks.bumps) console.log(`  climax ${fmt(b.t)}: lum ${b.lum.toFixed(3)} vs neighbours ${b.neighbours.toFixed(3)} -> bump ${b.bump >= 0 ? '+' : ''}${b.bump.toFixed(3)}`);
   // the debug overlay (journey row, palette swatches, journey curve) and the Shift+digit scrub
   await page.keyboard.press('h');

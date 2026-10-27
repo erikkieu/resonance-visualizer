@@ -209,6 +209,9 @@ const PALETTE = {
 };
 // lightness span of all the families together: mapped onto the journey's lightness window
 const FAMILY_L = [Math.min(...PALETTE.FAMILIES.map((f) => f.L[0])), Math.max(...PALETTE.FAMILIES.map((f) => f.L[1]))];
+// families that keep their own lightness at every point of the journey (PROFILE.BRIGHT_FAMILIES)
+const BRIGHT_FAMILY = PALETTE.FAMILIES.map((f) => PROFILE.BRIGHT_FAMILIES.includes(f.name));
+const YELLOW = PALETTE.FAMILIES.findIndex((f) => f.name === 'yellow');
 // Note glow: light (not paint) where a note appears, fading quickly, so you
 // can see each note of the melody arrive
 const GLOW = {
@@ -691,7 +694,8 @@ export default class Scene1Fluid extends SceneBase {
       const P = this.pal;
       // the family's own lightness, squeezed into the journey's window (a
       // night note stays dark unless it is one of the rare bright accents)
-      const [lo, hi] = tint.accent ? PROFILE.ACCENT.L : P.L;
+      // (yellow keeps its own lightness: squeezed darker it would turn olive)
+      const [lo, hi] = tint.accent ? PROFILE.ACCENT.L : BRIGHT_FAMILY[tint.family] ? FAMILY_L : P.L;
       const fl = (lerp(f.L[0], f.L[1], clamp01(height + jitter)) - FAMILY_L[0]) / (FAMILY_L[1] - FAMILY_L[0]);
       const rampL = L;
       const rampA = A;
@@ -1510,7 +1514,10 @@ export default class Scene1Fluid extends SceneBase {
       const vx = (e.dx + rand(-0.3, 0.3)) * strength;
       const vy = (e.dy + rand(-0.3, 0.3)) * strength;
       const accent = Math.random() < COLOUR.GOLD.ACCENT_CHANCE * this.pal.gold ? rand(...COLOUR.GOLD.ACCENT_AMOUNT) : 0;
-      this._gust({ emitter: e, vx, vy, amount: rand(0.7, 1.3), goldAccent: accent, radius: radius * this.feel.RADIUS * lerp(0.85, 1.25, this.loud), duration });
+      // some pours are bright yellow splashes, at every point of the journey
+      const yf = PALETTE.FAMILIES[YELLOW];
+      const tint = Math.random() < lerp(...PROFILE.YELLOW_SPLASH, this.journey) ? { family: YELLOW, hue: rand(...yf.hue), chroma: rand(...yf.C) } : null;
+      this._gust({ emitter: e, vx, vy, amount: rand(0.7, 1.3), goldAccent: accent, tint, height: tint ? rand(0.4, 1) : undefined, radius: radius * this.feel.RADIUS * lerp(0.85, 1.25, this.loud), duration });
     };
     const anyEmitter = () => this.emitters[(Math.random() * 3) | 0];
 

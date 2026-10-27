@@ -17,8 +17,10 @@
  *     F# violet-blue, A gold, B purple, E white) and turns the paint's hue
  *   - the final rising climax opens a big, expansive pour from below
  *
- * On top of that runs the JOURNEY: one slow value, 0 = dawn (pale, airy,
- * high-key) to 1 = deep night, read from hand-set keyframes at the playhead.
+ * On top of that runs the JOURNEY: one slow value, 0 = dawn to 1 = night,
+ * read from hand-set keyframes at the playhead. The background stays dark
+ * throughout; the swirls travel from white, yellow and light blues to deeper,
+ * brighter blues and purple, with yellow splashes all the way.
  * It blends the PALETTES (pitch ramp, ground, note lightness window, family
  * weights, exposure, lacing ...), sets the fluid's FEEL (thin and fast early,
  * heavy and swirling late), turns the dominant FLOW from a diagonal drift into
@@ -57,13 +59,17 @@ export const PROFILE = {
     FORCE: -0.01, // >= 0 pins the journey there (T slider, for tuning a palette); < 0 follows the music
   },
 
-  // palette stops along the journey, blended between the two nearest:
+  // palette stops along the journey, blended between the two nearest. The
+  // background stays dark the whole piece (every ramp starts dark navy / purple,
+  // so low notes read as background); only the swirls travel:
+  // white, yellow and light blues early -> deeper, brighter blues and purple late,
+  // with yellow splashes all the way through.
   //   ramp      pitch height -> paint colour (sRGB), the scene's COLOUR.RAMP for this stop
   //   ground    [deep, light] colour of the bare canvas (mottled between the two)
   //   L         lightness window note colours are squeezed into (low notes -> lo, high -> hi)
   //   chroma    × note colour saturation
   //   families  × weights of the note colour families [blue, purple, yellow, white]
-  //   exposure  × the scene's exposure (high-key early, low-key late)
+  //   exposure  × the scene's exposure
   //   lace      0 = dark ultramarine lacing veins, 1 = white lacing
   //   vignette  corner darkening
   //   gold      × gold accents
@@ -72,61 +78,66 @@ export const PROFILE = {
     {
       at: 0,
       name: 'dawn',
-      ramp: [[0, '#80b4de'], [0.3, '#a6d4ee'], [0.5, '#c4ecf2'], [0.7, '#e2f6ee'], [0.85, '#f5faff'], [1, '#fff5de']],
-      ground: ['#b9d9e6', '#eef9fb'],
-      L: [0.76, 0.98], chroma: 0.55, families: [1, 0.35, 0.6, 1.8],
-      exposure: 1.04, lace: 1, vignette: 0.1, gold: 0.5, glow: 0.5,
+      ramp: [[0, '#0a1640'], [0.25, '#1c3a7a'], [0.45, '#6fa8dc'], [0.65, '#c4e2f8'], [0.8, '#f4f8ff'], [1, '#ffe9a8']],
+      ground: ['#030a1e', '#0a1f4a'],
+      L: [0.34, 0.97], chroma: 0.7, families: [1, 0.25, 1.7, 1.6],
+      exposure: 1, lace: 0, vignette: 0.35, gold: 1.2, glow: 0.9,
     },
     {
       at: 0.2,
       name: 'day',
-      ramp: [[0, '#3f86c8'], [0.3, '#5cb0e6'], [0.5, '#5fd0ee'], [0.7, '#a8e4f6'], [0.85, '#e4f6ff'], [1, '#fffaf0']],
-      ground: ['#86c0e0', '#d6effa'],
-      L: [0.6, 0.98], chroma: 0.9, families: [1.3, 0.5, 0.8, 1.1],
-      exposure: 1.06, lace: 0.8, vignette: 0.14, gold: 1, glow: 0.8,
+      ramp: [[0, '#0a1640'], [0.25, '#163c86'], [0.45, '#4a90d8'], [0.65, '#8fd2f6'], [0.8, '#e8f6ff'], [1, '#fff2c0']],
+      ground: ['#030a1e', '#0a1f4a'],
+      L: [0.32, 0.96], chroma: 0.9, families: [1.3, 0.4, 1.3, 1.1],
+      exposure: 1, lace: 0, vignette: 0.35, gold: 1.1, glow: 1,
     },
     {
       at: 0.45,
       name: 'ocean',
-      ramp: [[0, '#10216a'], [0.25, '#123c9e'], [0.45, '#1468c8'], [0.6, '#18a2e0'], [0.8, '#7cc8f2'], [1, '#dcefff']],
-      ground: ['#05214c', '#0d4a80'],
-      L: [0.4, 0.9], chroma: 1, families: [1.5, 0.7, 0.5, 0.6],
-      exposure: 1, lace: 0.15, vignette: 0.32, gold: 1, glow: 1,
+      ramp: [[0, '#0b1450'], [0.25, '#1438a0'], [0.45, '#1a7cf0'], [0.6, '#22b0ff'], [0.8, '#8ad0ff'], [1, '#dceeff']],
+      ground: ['#030a1e', '#0a1f4a'],
+      L: [0.3, 0.9], chroma: 1.05, families: [1.6, 0.7, 0.8, 0.6],
+      exposure: 1, lace: 0, vignette: 0.35, gold: 1, glow: 1,
     },
     {
       at: 0.65,
       name: 'dusk',
-      ramp: [[0, '#140c3e'], [0.3, '#1c1f7a'], [0.5, '#2a3aa8'], [0.7, '#4a3fae'], [0.85, '#5a74d0'], [1, '#a8c4f4']],
-      ground: ['#070b30', '#161a5c'],
-      L: [0.28, 0.76], chroma: 1, families: [1, 1.6, 0.3, 0.4],
-      exposure: 0.92, lace: 0, vignette: 0.42, gold: 0.7, glow: 1.1,
+      ramp: [[0, '#120a40'], [0.25, '#22208a'], [0.45, '#2a4ad8'], [0.65, '#5a50e6'], [0.85, '#7f9cff'], [1, '#c4d4ff']],
+      ground: ['#030a1e', '#0a1f4a'],
+      L: [0.28, 0.84], chroma: 1.15, families: [1.3, 1.4, 0.6, 0.35],
+      exposure: 1, lace: 0, vignette: 0.35, gold: 0.9, glow: 1.05,
     },
     {
       at: 1,
       name: 'night',
-      ramp: [[0, '#03040c'], [0.3, '#081030'], [0.55, '#0e1a4c'], [0.75, '#22195e'], [0.9, '#24489a'], [1, '#86d0fa']],
-      ground: ['#010207', '#050a22'],
-      L: [0.14, 0.5], chroma: 0.85, families: [1.4, 0.9, 0.1, 0.35],
-      exposure: 0.86, lace: 0, vignette: 0.5, gold: 0.35, glow: 1.2,
+      ramp: [[0, '#14063a'], [0.3, '#2a1280'], [0.5, '#2a30c8'], [0.7, '#2f62f6'], [0.85, '#7a50f0'], [1, '#a8b8ff']],
+      ground: ['#020716', '#08183c'],
+      L: [0.26, 0.8], chroma: 1.25, families: [1.3, 1.6, 0.55, 0.25],
+      exposure: 1, lace: 0, vignette: 0.38, gold: 0.85, glow: 1.1,
     },
   ],
+  // families whose own (bright) lightness is kept at every point of the journey:
+  // yellow squeezed into a darker window would turn olive / grey
+  BRIGHT_FAMILIES: ['yellow'],
+  // share of pours that carry a bright yellow splash, by journey [dawn, night]
+  YELLOW_SPLASH: [0.16, 0.1],
   // share of notes that ignore the lightness window (bright accents), by journey [dawn, night]
   // they are cyan / ice white whatever their family
-  ACCENT: { CHANCE: [0, 0.2], L: [0.66, 0.95], HUE: [218, 245], CHROMA: [0.04, 0.1] },
+  ACCENT: { CHANCE: [0, 0.08], L: [0.66, 0.95], HUE: [218, 245], CHROMA: [0.04, 0.1] },
 
   // fluid character by journey, [dawn, night], linearly interpolated:
   // early thin, fast-spreading and airy; late thick, slow, heavy and swirling
   FEEL: {
-    DYE_FADE: [1.3, 0.85], // × paint dissipation (thin paint turns over faster)
+    DYE_FADE: [1.35, 1.6], // × paint dissipation: old paint fades so the dark ground keeps showing (the dense finale needs it most)
     DAMPING: [0.8, 1.35], // × velocity dissipation (viscous late)
     SPEED: [1.1, 0.82], // × simulation clock
     SWIRL: [0.7, 1.2], // × vorticity confinement (more makes fine wrinkles, not big vortices: FLOW adds those)
-    RADIUS: [1.45, 0.85], // × pour splat radius (large soft splats early)
+    RADIUS: [1.2, 0.9], // × pour splat radius (larger soft splats early; not so large that paint hides the dark ground)
     FORCE: [1.1, 0.8], // × pour push
     BLOOM: [1.2, 0.9], // × note bloom size
-    CELLS: [1.6, 0.6], // × cell openings
+    CELLS: [1.6, 1.2], // × cell openings (holes down to the dark ground)
     LACE: [1.3, 0.75], // × lacing vein strength
-    EXPOSURE_RANGE: [0.45, 1], // share of the quiet-dims exposure curve applied (a dawn canvas stays high-key)
+    EXPOSURE_RANGE: [0.7, 1], // share of the quiet-dims exposure curve applied (the light early swirls dim less)
   },
 
   // dominant flow: a gentle diagonal drift early, slow spirals late
@@ -143,7 +154,7 @@ export const PROFILE = {
 
   // washes: large, slow sweeps of the current palette, so the canvas visibly
   // turns over (not only the new paint changes colour)
-  WASH: { EVERY: [6, 10], RADIUS: [0.018, 0.032], PUSH: [60, 120], PAINT: [0.5, 0.9], DURATION: 3.5 },
+  WASH: { EVERY: [6, 10], RADIUS: [0.012, 0.022], PUSH: [60, 120], PAINT: [0.3, 0.55], DURATION: 3.5 },
 
   // deep in the journey a climax flares blue-white against the dark
   FLARE: { FROM: [0.45, 0.7], RATE: 2.5, PUSH: [180, 320], RADIUS: [0.002, 0.005], PAINT: 0.9, L: 0.93, HUE: 238, CHROMA: 0.07, GLOW: 0.7, GLOW_SIZE: 0.25 },
