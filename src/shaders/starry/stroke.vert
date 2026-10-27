@@ -24,6 +24,7 @@ uniform float uOpacity;
 uniform float uBright;    // overall stroke brightness (climax bloom)
 uniform float uSway;      // cypress sway amplitude
 uniform float uTime;
+uniform float uLayer;       // 0: sky and hills, 1: the foreground on top (buildings, cypress)
 uniform sampler2D tInv;     // coverage -> reveal clock (s) it was reached at, INV_BINS texels
 uniform float uRevealNow;   // the reveal clock now: the playhead, or the live painting clock
 uniform float uCover;       // coverage now (for the optional dissolve at the end)
@@ -77,15 +78,19 @@ void main() {
   vec2 huv = toUV(home.xy);
   vec4 mask = textureLod(tMask, huv, 1.5);
   float cypress = smoothstep(0.25, 0.6, mask.r);
+  float building = smoothstep(0.3, 0.7, texelFetch(tMask, ivec2(huv * vec2(textureSize(tMask, 0))), 0).a);
   float land = mask.g * (1.0 - cypress);
+  // two passes: the buildings and the cypress are painted over the sky and the hills
+  if ((max(cypress, building) > 0.5 ? 1.0 : 0.0) != uLayer) {
+    hide();
+    return;
+  }
 
-  // size by region: long flames in the cypress, shorter dabs in the village
+  // size by region: long flames in the cypress, short narrow dabs on the buildings (fine detail)
   float len = mix(0.022, 0.042, home.z);
   float wid = mix(0.0055, 0.0095, hash11(seed * 91.7));
-  // the village is fine detail: short, narrow dabs
-  float village = land * smoothstep(0.26, 0.18, home.y);
-  len *= mix(1.0, 1.7, cypress) * mix(1.0, 0.75, land) * mix(1.0, 0.6, village);
-  wid *= mix(1.0, 0.8, cypress) * mix(1.0, 0.7, village);
+  len *= mix(1.0, 1.7, cypress) * mix(1.0, 0.75, land) * mix(1.0, 0.5, building);
+  wid *= mix(1.0, 0.8, cypress) * mix(1.0, 0.6, building);
 
   // draw on: the brush head sweeps from the start to the end (eased), longer for long strokes
   float g = clamp(age / mix(uGrow.x, uGrow.y, clamp((len - 0.02) / 0.05, 0.0, 1.0)), 0.0, 1.0);
@@ -94,7 +99,7 @@ void main() {
   vWet = uWet.y * exp(-age / uWet.x);
   wid *= 1.0 - 0.12 * vWet / max(uWet.y, 1e-3); // the paint settles a touch thicker as it dries
 
-  vec2 pos = st.xy;
+  vec2 pos = mix(st.xy, home.xy, building); // buildings stay exactly where they are painted
   // the cypress sways from its base, more with the music's energy
   pos.x += uSway * cypress * pow(clamp(home.y / 0.95, 0.0, 1.0), 2.0) * sin(uTime * 0.6 + home.y * 2.0);
 
@@ -103,6 +108,15 @@ void main() {
   vec2 dirB = flowDir(pos - dir * len * 0.5, dir);
   vec2 dirA = flowDir(pos + dir * len * 0.5, dir);
   float turn = atan(dirB.x * dirA.y - dirB.y * dirA.x, dot(dirB, dirA));
+  if (building > 0.5) {
+    // buildings: straight strokes along the painted edges (walls and the spire upright, roofs along their slope)
+    vec2 e = vec2(0.004 / uAspect, 0.004);
+    float gx = luma(textureLod(tRef, refUV(huv + vec2(e.x, 0.0)), 1.5).rgb) - luma(textureLod(tRef, refUV(huv - vec2(e.x, 0.0)), 1.5).rgb);
+    float gy = luma(textureLod(tRef, refUV(huv + vec2(0.0, e.y)), 1.5).rgb) - luma(textureLod(tRef, refUV(huv - vec2(0.0, e.y)), 1.5).rgb);
+    vec2 g = vec2(-gy, gx);
+    dir = length(g) > 0.01 ? normalize(g) : vec2(1.0, 0.0);
+    turn = 0.0;
+  }
   vec2 nrm = vec2(-dir.y, dir.x);
   float u = min(position.x, vHead); // past the brush head the strip folds onto it
   vLocal.x = u;
@@ -118,7 +132,7 @@ void main() {
 
   vec3 col = textureLod(tRef, refUV(huv), 1.2).rgb;
   // a touch of the colour where the stroke now is: gentle drift along the flow
-  col = mix(col, textureLod(tRef, refUV(toUV(pos)), 1.2).rgb, 0.2);
+  col = mix(col, textureLod(tRef, refUV(toUV(pos)), 1.2).rgb, 0.2 * (1.0 - building));
   col *= (0.9 + 0.2 * hash11(seed * 37.3)) * uBright * (1.0 + vWet);
   col += (hash11(seed * 53.1) - 0.5) * vec3(0.012, 0.0, -0.012);
   vColor = col;
@@ -126,6 +140,6 @@ void main() {
   // another region (sky over the cypress, hills into the sky) fade away, so
   // silhouettes stay crisp
   vec4 here = textureLod(tMask, toUV(pos), 1.5);
-  float stray = abs(smoothstep(0.25, 0.6, here.r) - cypress) + abs(here.g - mask.g);
+  float stray = abs(smoothstep(0.25, 0.6, here.r) - cypress) + abs(here.g - mask.g) + abs(here.a - mask.a) * (1.0 - building);
   vAlpha = uOpacity * smoothstep(0.0, 0.12, st.z) * smoothstep(1.0, 0.8, st.z) * (1.0 - clamp(stray * 1.5, 0.0, 1.0)) * kept;
 }

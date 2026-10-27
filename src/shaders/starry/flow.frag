@@ -45,5 +45,6 @@ void main() {
   vec2 flame = vec2(0.12 * sin(p.y * 14.0 + uTime * 0.5), 0.45);
   v = mix(v, hills, m.g);
   v = mix(v, flame, smoothstep(0.2, 0.6, m.r));
+  v *= 1.0 - m.a; // the houses and the church stand still (no drift, no smear)
   gl_FragColor = vec4(v * uFlowGain, 0.0, 1.0);
 }

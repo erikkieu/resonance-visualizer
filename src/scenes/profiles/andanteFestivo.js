@@ -118,7 +118,7 @@ export const PROFILE = {
   // ---- the painting paints itself: coverage(t) and the painter's order
   REVEAL: {
     COMPLETE_AT: null, // s the painting is finished; null = the main climax's peak from the analysis (3:44.2)
-    MIN_RATE: 0.12, // painting rate in silence, against loudness^EXPONENT (0..1): never stalls
+    MIN_RATE: 0.12, // painting rate in silence, against loudness^EXPONENT (0..1): never stalls once the music has begun (black until its first note)
     EXPONENT: 1.3,
     SMOOTH: 2, // s: the loudness rate is smoothed over this, so the painting never jumps
     GESTURE: { AMP: 0.5, WIDTH: 0.35, GAP: 2.5 }, // the strongest bow attacks (top RIPPLE_SHARE): a burst of rate (Gaussian, s), at most one per GAP s
@@ -126,14 +126,14 @@ export const PROFILE = {
     LIVE_LEVEL: 0.5, // typical live drive the FALLBACK is reckoned with
     // the painter's order, in coverage: when each part of the painting is painted
     STAGES: {
-      PRIMER: [0.01, 0.04], // black, then a faint dark-blue primer wash
-      SKY: [0.04, 0.3], // broad dark-blue sky strokes, in patches across the canvas
+      PRIMER: [0, 0.02], // a faint dark-blue primer wash, under the first strokes
+      SKY: [0, 0.3], // broad dark-blue sky strokes, in patches across the canvas: the first ones with the first note
       SWIRLS: [0.3, 0.55], // the pale strokes: the great spiral and its partner growing outward, the wind bands
-      HILLS: [0.4, 0.56], // far hills first
+      HILLS: [0.15, 0.5], // the lower part: far hills first, from ~0:30 (coverage 0.15 with this piece) to ~1:57
       CYPRESS: [0.48, 0.65], // from its base upward, like a flame
       STARS: [0.55, 0.8], // halos ring by ring (outer to inner), a few stars at a time, golden centres last
       MOON: [0.8, 0.92], // the moon, ring by ring, brightening
-      VILLAGE: [0.9, 0.97], // the houses and the church
+      VILLAGE: [0.15, 0.92], // the houses and the church: the lower part too, built up slowly from ~0:30
       WINDOWS: [0.95, 1], // the warm windows light up one by one, arriving with the climax
     },
     STAR_WINDOW: 0.3, // share of the STARS stage each star takes (they overlap: a few at a time)
@@ -142,7 +142,6 @@ export const PROFILE = {
     HALO_SIZE: 2.2, // star halo extent in star radii (moon: MOON_SIZE)
     MOON_SIZE: 2.4,
     PALE: 0.55, // sky brighter than this share of the sky is pale paint (swirls, wind bands, halos)
-    VILLAGE_TOP: 0.26, // painting height the village stays under
     PATCH: [0.16, 0.05], // painting heights: patch sizes the painter works across (coarse, fine)
     JITTER: 0.025, // per-stroke rank jitter (rings and windows get a quarter of it)
     GROW: [0.4, 1.2], // s a stroke takes to draw on (short ... long strokes)

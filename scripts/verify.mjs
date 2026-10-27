@@ -1492,6 +1492,26 @@ async function revealPass(page, dir, seekAndPlay, analysis) {
     return out;
   }, dur);
   const info = await scene();
+  // the first strokes: when the coverage passes the lowest rank, against the first note
+  const firstStroke = await page.evaluate((rank) => {
+    const sc = window.__resonance.manager.current.scene;
+    for (let t = 0; t < 30; t += 0.01) if (sc.coverAt(t) >= rank) return t;
+    return Infinity;
+  }, info.firstRank);
+  const firstNote = analysis.onsets.times[0];
+  const early = await page.evaluate(() => {
+    const sc = window.__resonance.manager.current.scene;
+    const R = sc.sortedRanks;
+    return [1, 1.5, 2, 3, 5].map((t) => {
+      const c = sc.coverAt(t);
+      let k = 0;
+      while (k < R.length && R[k] <= c) k++;
+      return [t, c, Math.round((k / R.length) * sc.strokes.geometry.instanceCount)];
+    });
+  });
+  const stageTimes = await page.evaluate(() => window.__resonance.manager.current.scene.stageTimes);
+  console.log(`  stages begin: ${Object.entries(stageTimes).map(([k, t]) => `${k} ${fmt(t)}`).join(' · ')}`);
+  console.log(`  first note ${fmt(firstNote)} · first stroke painted ${fmt(firstStroke)} · strokes by ${early.map(([t, c, k]) => `${t} s: ${k} (${(c * 100).toFixed(2)} %)`).join(' · ')}`);
   // the level, mean per second
   const lv = analysis.level;
   const r = analysis.frameRate;
@@ -1552,13 +1572,14 @@ async function revealPass(page, dir, seekAndPlay, analysis) {
   const ok = (b) => (b ? 'PASS' : 'FAIL');
   const checks = {
     start: curve[0] <= 0.001,
+    firstNote: firstStroke >= firstNote - 0.05 && firstStroke <= firstNote + 0.5 && early[2][2] >= 50,
     monotonic: minStep >= 0,
     louder: loudRate >= 1.5 * quietRate && corr > 0.5,
     complete: Math.abs(curve[Math.ceil(done)] - 1) < 1e-6 && curve[Math.floor(done) - 1] < 1,
     holds: curve.slice(Math.ceil(done)).every((c) => c === 1),
     seek: pairErr < 0.005 && seekErr < 0.005,
   };
-  console.log(`  ${ok(checks.start)} 0 at the start · ${ok(checks.monotonic)} never falls · ${ok(checks.louder)} faster when louder · ${ok(checks.complete)} 1.0 at the main climax · ${ok(checks.holds)} holds after · ${ok(checks.seek)} seek-safe`);
+  console.log(`  ${ok(checks.start)} 0 at the start · ${ok(checks.firstNote)} paints from the first note · ${ok(checks.monotonic)} never falls · ${ok(checks.louder)} faster when louder · ${ok(checks.complete)} 1.0 at the main climax · ${ok(checks.holds)} holds after · ${ok(checks.seek)} seek-safe`);
 
   const shots = [];
   for (const t of REVEAL_SHOTS) {
@@ -1570,7 +1591,7 @@ async function revealPass(page, dir, seekAndPlay, analysis) {
     console.log(`  shot ${fmt(t)}: ${(s.cover * 100).toFixed(1)} % · ${s.stage}`);
   }
   const minFps = Math.min(...rows.map((s) => s.fps));
-  return { curve, completeAt: done, corr, quietRate, loudRate, rows, seeks, checks, shots, minFps };
+  return { curve, completeAt: done, firstNote, firstStroke, early, corr, quietRate, loudRate, rows, seeks, checks, shots, minFps };
 }
 
 /** Sky clock units per second of playhead at the fastest sample (a bound for the seek check). */

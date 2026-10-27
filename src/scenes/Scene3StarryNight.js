@@ -59,7 +59,8 @@ import finalFrag from '../shaders/starry/final.frag?raw';
  * base, star halos ring by ring, the moon, the village and its windows); the
  * coverage(t) curve integrates the piece's loudness (_prepareReveal), and a
  * stroke draws on when the coverage passes its rank. Everything is a function
- * of the playhead, so seeking and pausing are safe (the wet canvas snaps to
+ * of the playhead (black until the first note, whose strokes start the
+ * painting), so seeking and pausing are safe (the wet canvas snaps to
  * the moment after a seek). Without the analysis the live loudness paints it.
  *
  * Keys: [ ] reactivity (also a slider in the D overlay); Shift+P replays the
@@ -93,6 +94,15 @@ const CONFIG = {
   ],
   MOON: [0.906, 0.842, 0.084],
   HORIZON: [0.32, 0.3, 0.29, 0.28, 0.29, 0.36, 0.36, 0.41, 0.45, 0.48, 0.47], // v at u = 0, 0.1 ... 1
+  // the buildings, measured off the reference: they stand still, keep their own upright / roof-wise
+  // strokes and are painted on top of the sky and the hills (mask.frag, a second stroke pass)
+  BUILDINGS: {
+    VILLAGE: [[0.4, 0.17], [0.75, 0.17], [1, 0.13]], // top line of the houses (u, v); houses below it, right of the first point
+    SPIRE: [0.5554, 0.5791, 0.205, 0.3642], // u0, u1 at its base, base v, tip v
+    TOWER: [0.5554, 0.583, 0.1, 0.205], // u0, u1, v0, v1
+    NAVE: [0.508, 0.556, 0.1, 0.165], // walls
+    GABLE: 0.2, // v of the nave's gable peak
+  },
 
   // Fitting the painting to the screen
   FIT_STRETCH: 1.2, // max horizontal stretch on wide screens (the rest is a vertical crop)
@@ -332,7 +342,20 @@ export default class Scene3StarryNight extends SceneBase {
       magFilter: THREE.LinearFilter,
       depthBuffer: false,
     });
-    const maskMat = passMaterial({ fragmentShader: prefix + maskFrag, uniforms: { ...paintUniforms(), tRef: { value: this.ref }, uHorizon: { value: C.HORIZON } } });
+    const B0 = C.BUILDINGS;
+    const maskMat = passMaterial({
+      fragmentShader: prefix + maskFrag,
+      uniforms: {
+        ...paintUniforms(),
+        tRef: { value: this.ref },
+        uHorizon: { value: C.HORIZON },
+        uVillage: { value: B0.VILLAGE.map(([u, v]) => new THREE.Vector2(u, v)) },
+        uSpire: { value: new THREE.Vector4(...B0.SPIRE) },
+        uTower: { value: new THREE.Vector4(...B0.TOWER) },
+        uNave: { value: new THREE.Vector4(...B0.NAVE) },
+        uGable: { value: B0.GABLE },
+      },
+    });
     this.pass.render(renderer, maskMat, this.maskRT);
     maskMat.dispose();
     renderer.setRenderTarget(null); // makes three refresh the mask's mipmaps
@@ -437,6 +460,7 @@ export default class Scene3StarryNight extends SceneBase {
         uBright: { value: 1 },
         uSway: { value: PROFILE.LOWER.SWAY_MIN },
         uTime: { value: 0 },
+        uLayer: { value: 0 },
         tInv: { value: this.invTex },
         uRevealNow: { value: 0 },
         uCover: { value: 0 },
@@ -450,6 +474,11 @@ export default class Scene3StarryNight extends SceneBase {
     strokeGeo.setAttribute('aRank', new THREE.InstancedBufferAttribute(this.ranks, 1));
     this.strokes = new THREE.Mesh(strokeGeo, this.strokeMat);
     this.strokes.frustumCulled = false;
+    // the foreground (buildings, cypress): the same strokes, a second pass on top (shares every uniform but the layer)
+    this.strokeMatTop = new THREE.ShaderMaterial({ vertexShader: this.strokeMat.vertexShader, fragmentShader: this.strokeMat.fragmentShader, defines: { INV_BINS }, uniforms: { ...this.strokeMat.uniforms, uLayer: { value: 1 } }, ...blend });
+    this.strokesTop = new THREE.Mesh(strokeGeo, this.strokeMatTop);
+    this.strokesTop.frustumCulled = false;
+    this.strokesTop.renderOrder = 1;
 
     const B = C.BURSTS;
     this.burstMat = new THREE.ShaderMaterial({
@@ -469,7 +498,8 @@ export default class Scene3StarryNight extends SceneBase {
     this.bursts = new THREE.Mesh(strokeGeometry(4, B.COUNT * B.STROKES), this.burstMat);
     this.bursts.frustumCulled = false;
     this.paintScene = new THREE.Scene();
-    this.paintScene.add(this.strokes, this.bursts);
+    this.bursts.renderOrder = 2;
+    this.paintScene.add(this.strokes, this.strokesTop, this.bursts);
     this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
     // --- canvas feedback and the final pass
@@ -483,6 +513,7 @@ export default class Scene3StarryNight extends SceneBase {
         uDt: { value: 0 },
         uSmear: { value: C.FLOW.SMEAR },
         uFade: { value: C.FLOW.FADE },
+        tMask: { value: this.maskRT.texture },
         tRank: { value: this.rankTex },
         uCover: { value: 0 },
         uPrimer: { value: new THREE.Vector2(...RV.STAGES.PRIMER) },
@@ -594,6 +625,18 @@ export default class Scene3StarryNight extends SceneBase {
       const i = Math.min(9, Math.floor(x));
       return lerp(H[i], H[i + 1], x - i);
     };
+    // the same building shapes as mask.frag
+    const B0 = CONFIG.BUILDINGS;
+    const [V0, V1, V2] = B0.VILLAGE;
+    const inBox = (u, v, [u0, u1, v0, v1]) => u >= u0 && u <= u1 && v >= v0 && v <= v1;
+    const inSpike = (u, v, [u0, u1, v0, v1]) => {
+      const t = (v - v0) / (v1 - v0);
+      return t >= 0 && t <= 1 && Math.abs(u - 0.5 * (u0 + u1)) <= 0.5 * (u1 - u0) * (1 - t);
+    };
+    const inBuilding = (u, v) => {
+      const top = u < V1[0] ? lerp(V0[1], V1[1], clamp01((u - V0[0]) / (V1[0] - V0[0]))) : lerp(V1[1], V2[1], clamp01((u - V1[0]) / (V2[0] - V1[0])));
+      return (u >= V0[0] && v < top) || inSpike(u, v, B0.SPIRE) || inBox(u, v, B0.TOWER) || inBox(u, v, B0.NAVE) || inSpike(u, v, [B0.NAVE[0], B0.NAVE[1], B0.NAVE[3], B0.GABLE]);
+    };
     const ringKey = (dn, rings, core) => (dn < core ? 1 : Math.min(rings - 1, Math.floor(((1 - dn) / (1 - core)) * rings)) / rings);
     // the brightest (1 - PALE) of the open sky is pale paint
     const skyLum = [];
@@ -628,16 +671,17 @@ export default class Scene3StarryNight extends SceneBase {
           // the cypress grows from its base like a flame
           cls[i] = K_CYPRESS;
           key[i] = v + 0.06 * patch(X, v, 5);
+        } else if (inBuilding(u, v)) {
+          if (px[i * 4 + 2] > 20) {
+            // (a low threshold: the windows' soft edges must wait for them too)
+            cls[i] = K_WINDOW; // one moment per window
+            key[i] = hash2(Math.floor(X / 0.02), Math.floor(v / 0.02), 9);
+          } else {
+            cls[i] = K_VILLAGE;
+            key[i] = 0.5 * u + 0.5 * patch(X, v, 6);
+          }
         } else if (land[i]) {
-          if (v < RV.VILLAGE_TOP && u > 0.22) {
-            if (px[i * 4 + 2] > 77) {
-              cls[i] = K_WINDOW; // one moment per window
-              key[i] = hash2(Math.floor(X / 0.02), Math.floor(v / 0.02), 9);
-            } else {
-              cls[i] = K_VILLAGE;
-              key[i] = 0.5 * u + 0.5 * patch(X, v, 6);
-            }
-          } else cls[i] = K_HILL;
+          cls[i] = K_HILL;
         } else {
           const pl = lum >= pale;
           const dm = Math.hypot(X - moon.x, v - moon.y) / moon.z;
@@ -704,7 +748,8 @@ export default class Scene3StarryNight extends SceneBase {
       const y = Math.min(h - 1, Math.floor(home[k * 4 + 1] * h));
       const i = y * w + x;
       const fine = cls[i] === K_STAR || cls[i] === K_MOON || cls[i] === K_WINDOW;
-      this.ranks[k] = Math.min(0.999, Math.max(0.0005, front[i] + (rnd() - 0.5) * RV.JITTER * (fine ? 0.25 : 1)));
+      // (reflected at 0, so the first strokes of the piece don't all land on one frame)
+      this.ranks[k] = Math.min(0.999, Math.max(0.0002, Math.abs(front[i] + (rnd() - 0.5) * RV.JITTER * (fine ? 0.25 : 1))));
     }
     this.sortedRanks = Float32Array.from(this.ranks).sort();
   }
@@ -765,6 +810,9 @@ export default class Scene3StarryNight extends SceneBase {
         gestureArea += (G.AMP * Math.exp(-z * z)) / r;
       }
     }
+    // black until the music begins (its first note or sound): the first strokes come with it
+    this.musicStart = Math.min(map.onsets[0]?.t ?? Infinity, Math.max(0, map.level.findIndex((l) => l > 0.05)) / r);
+    for (let i = 0; i < Math.min(n, Math.ceil(this.musicStart * r)); i++) rate[i] = 0;
     const C = new Float32Array(n);
     for (let i = 1; i < n; i++) C[i] = C[i - 1] + (0.5 * (rate[i - 1] + rate[i])) / r;
     const x = Math.min(n - 1, this.completeAt * r);
@@ -1384,6 +1432,12 @@ export default class Scene3StarryNight extends SceneBase {
     return `<svg width="${W}" height="${Hh}" style="vertical-align:middle"><rect width="${W}" height="${Hh}" fill="#ffffff10"/><line x1="${cx}" x2="${cx}" y1="0" y2="${Hh}" stroke="#ffc86066"/><polyline points="${this.curvePath}" fill="none" stroke="#8fb8e8" stroke-width="1.5"/><line x1="${px}" x2="${px}" y1="0" y2="${Hh}" stroke="#fff"/></svg>`;
   }
 
+  /** Playhead (s) at which each stage of the painter's order begins (from the coverage table). */
+  get stageTimes() {
+    const inv = this.invTex.image.data;
+    return Object.fromEntries(Object.entries(PROFILE.REVEAL.STAGES).map(([k, [a]]) => [STAGE_NAMES[k] ?? k, inv[Math.round(a * (INV_BINS - 1))]]));
+  }
+
   /** The painting painting itself, for verify (--reveal) and the debug overlay. */
   get reveal() {
     const total = this.strokes.geometry.instanceCount;
@@ -1395,7 +1449,7 @@ export default class Scene3StarryNight extends SceneBase {
       if (R[m] <= this.coverEff) lo = m + 1;
       else hi = m;
     }
-    return { cover: this.cover, stage: this.stageName(this.cover), painted: Math.round((lo / R.length) * total), total, rate: this.revealRate, now: this.revealNow, completeAt: this.completeAt, bloom: this.bloom, skip: this.revealSkip, gestures: this.gestures ?? 0, gestureShare: this.gestureShare ?? 0 };
+    return { cover: this.cover, stage: this.stageName(this.cover), painted: Math.round((lo / R.length) * total), total, rate: this.revealRate, now: this.revealNow, completeAt: this.completeAt, bloom: this.bloom, skip: this.revealSkip, gestures: this.gestures ?? 0, gestureShare: this.gestureShare ?? 0, musicStart: this.musicStart ?? 0, firstRank: R[0] };
   }
 
   /** The breathing state, for verify (--festivo) and the debug overlay. */
@@ -1407,7 +1461,7 @@ export default class Scene3StarryNight extends SceneBase {
     window.removeEventListener('keydown', this._onKey);
     this.tune?.dispose();
     for (const t of [this.maskRT, this.flowRT, this.stateA, this.stateB, this.canvasA, this.canvasB, this.refRT, this.litRT]) t?.dispose();
-    for (const m of [this.flowMat, this.stateMat, this.canvasMat, this.copyMat, this.finalMat, this.strokeMat, this.burstMat, this.litMat]) m?.dispose();
+    for (const m of [this.flowMat, this.stateMat, this.canvasMat, this.copyMat, this.finalMat, this.strokeMat, this.strokeMatTop, this.burstMat, this.litMat]) m?.dispose();
     this.rankTex?.dispose();
     this.invTex?.dispose();
     this.strokes?.geometry.dispose();
