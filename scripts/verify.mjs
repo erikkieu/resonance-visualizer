@@ -26,6 +26,14 @@
  * frame) stays dark everywhere, that the swirls' hue moves from light blue /
  * yellow toward blue / purple, that yellow splashes remain, and reports the
  * bumps at the two climaxes.
+ *
+ *   npm run verify -- standchen --aurora [--out dir]
+ *
+ * checks Scene 2's audio-wave aurora: amplitude, ribbon hues, live pulses,
+ * mean luminance and fps at AURORA_TIMES, a hue trace over a 20 s melodic
+ * span, screenshots only at AURORA_SHOTS, and checks that it is faint when
+ * quiet, grows into the build, peaks at the 4:50 climax, is clearly smaller
+ * at 5:11, and that the hue moves with the melody.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -46,6 +54,11 @@ const JOURNEY = args.includes('--journey');
 const JOURNEY_TIMES = [10, 45, 90, 137, 210, 270, 320, 347, 390, 425]; // 0:10 0:45 1:30 2:17 3:30 4:30 5:20 5:47 6:30 7:05
 const JOURNEY_SHOTS = [10, 137, 270, 347, 425];
 const JOURNEY_CLIMAXES = [137, 347]; // should stand out against their neighbours
+const AURORA = args.includes('--aurora');
+const AURORA_TIMES = [10, 80, 160, 205, 260, 290, 311, 350]; // 0:10 1:20 2:40 3:25 4:20 4:50 5:11 5:50
+const AURORA_SHOTS = [10, 160, 290, 350];
+const AURORA_QUIET = [10, 205, 350]; // intro, the 3:20-3:35 release, the fade
+const AURORA_TRACE = [64, 84]; // s: 20 s of the 1:04 swell's melody, hue sampled every second
 const only = args.filter((a, i) => !a.startsWith('--') && !['--out', '--seq'].includes(args[i - 1]));
 const SEQ = flag('--seq', '')
   .split(',')
@@ -146,6 +159,16 @@ async function verifyPiece(browser, url, piece) {
         exposure: sc?.exposure ?? 1,
       };
     });
+
+  if (AURORA) {
+    const result = await auroraPass(page, dir, seekAndPlay, state);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    fs.writeFileSync(path.join(dir, 'aurora-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
+    console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
+    console.log(`  -> ${dir}`);
+    await page.close();
+    return;
+  }
 
   if (JOURNEY) {
     const journey = await journeyPass(page, dir, seekAndPlay, state);
@@ -319,6 +342,54 @@ async function journeyPass(page, dir, seekAndPlay, state) {
   await page.screenshot({ path: path.join(dir, 'journey-debug.png') });
   await page.keyboard.press('d');
   return { rows, checks, slope };
+}
+
+/** Scene 2's audio-wave aurora: numbers at AURORA_TIMES, a hue trace, screenshots at AURORA_SHOTS, checks. */
+async function auroraPass(page, dir, seekAndPlay, state) {
+  const aurora = () => page.evaluate(() => window.__resonance.manager.current?.scene?.auroraState);
+  const rows = [];
+  console.log('    time   amp    ribbon hues         pulses  lum    hue          fps');
+  let prev = -Infinity;
+  for (const t of AURORA_TIMES) {
+    // close samples play straight through: a seek restarts the climax envelope, so 5:11 must follow 4:50
+    await seekAndPlay(t, t - prev < 30 ? 0 : undefined);
+    prev = t;
+    const st = await state();
+    const a = await aurora();
+    const file = AURORA_SHOTS.includes(t) ? path.join(dir, `aurora-${fmt(t).replace(':', 'm')}.png`) : null;
+    const f = await frameStats(page, file);
+    rows.push({ t, ...a, lum: f.lum, frameHue: f.hue, frameHueName: f.hueName, fps: st.fps, stage: st.stage, file });
+    console.log(`  ${fmt(t).padStart(7)}  ${a.amp.toFixed(2)}   ${a.hues.map((h) => h.toFixed(2)).join(' ')}    ${String(a.pulses).padStart(2)}     ${f.lum.toFixed(3)}  ${String(f.hue).padStart(3)}° ${f.hueName.padEnd(7)}  ${st.fps.toFixed(0)}  ${st.stage}${file ? '  [shot]' : ''}`);
+  }
+  // the hue following the melody: one sample per second over AURORA_TRACE
+  const trace = [];
+  await seekAndPlay(AURORA_TRACE[0]);
+  for (let t = AURORA_TRACE[0]; t <= AURORA_TRACE[1]; t += 1) {
+    await seekAndPlay(t, 0);
+    const a = await aurora();
+    const m = await page.evaluate(() => window.__resonance.perf.height);
+    trace.push({ t, melody: m, hues: a.hues, fired: a.fired });
+  }
+  console.log(`  hue trace ${fmt(AURORA_TRACE[0])}-${fmt(AURORA_TRACE[1])} (melody height -> ribbon hues):`);
+  for (const r of trace) console.log(`     ${fmt(r.t)}  melody ${r.melody.toFixed(2)}  hues ${r.hues.map((h) => h.toFixed(2)).join(' ')}`);
+
+  const at = (t) => rows.find((r) => r.t === t);
+  const quiet = Math.max(...AURORA_QUIET.map((t) => at(t).amp));
+  const peak = at(290).amp;
+  const hueRange = Math.max(...trace.flatMap((r) => r.hues)) - Math.min(...trace.flatMap((r) => r.hues));
+  const checks = {
+    quietFaint: quiet < 0.35,
+    grows: at(260).amp > quiet + 0.2,
+    peaksAtClimax: rows.every((r) => r.amp <= peak + 1e-3),
+    smallerAfter: at(311).amp < peak * 0.8,
+    neverBlank: rows.every((r) => r.amp > 0.04),
+    hueMoves: hueRange > 0.1,
+  };
+  const ok = (v) => (v ? 'PASS' : 'FAIL');
+  console.log(`  quiet (0:10, 3:25, 5:50) max amp ${quiet.toFixed(2)} -> ${ok(checks.quietFaint)} faint · build 4:20 ${at(260).amp.toFixed(2)} -> ${ok(checks.grows)} grows`);
+  console.log(`  climax 4:50 ${peak.toFixed(2)} -> ${ok(checks.peaksAtClimax)} peak · 5:11 ${at(311).amp.toFixed(2)} (${((at(311).amp / peak) * 100).toFixed(0)} %) -> ${ok(checks.smallerAfter)} clearly smaller · ${ok(checks.neverBlank)} never blank`);
+  console.log(`  hue range over the trace ${hueRange.toFixed(2)} ramp units -> ${ok(checks.hueMoves)} moves with the melody`);
+  return { rows, trace, checks };
 }
 
 main().catch((err) => {
