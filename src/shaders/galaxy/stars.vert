@@ -13,6 +13,6 @@ void main() {
   gl_Position = projectionMatrix * mv;
   float tw = 0.78 + 0.22 * sin(uTime * (0.8 + aSeed * 2.5) + aSeed * 50.0);
   tw *= 1.0 + uTreble * 1.2 * pow(0.5 + 0.5 * sin(uTime * 11.0 + aSeed * 91.0), 6.0);
-  vColor = aColor * tw;
+  vColor = aColor * tw * (1.0 - diskShadow((modelMatrix * vec4(position, 1.0)).xyz));
   gl_PointSize = max(1.0, aSize * uScale);
 }
