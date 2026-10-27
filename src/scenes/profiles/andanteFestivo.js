@@ -38,6 +38,14 @@
  *   - only the strongest bow attacks (top 15 %) throw gentle ripples
  *   - REACTIVITY widens every [quiet, loud] range ([ ] keys, slider in D)
  *
+ * The painting paints itself (REVEAL): from a black canvas, stroke by stroke,
+ * finished at the main climax (3:44). Coverage (0..1) is the integral of
+ * (MIN_RATE + loudness^EXPONENT) over the piece, so quiet bars add a few
+ * strokes and swells sweep many in; the strongest bow attacks add a bold
+ * gesture. Each stroke has a rank in the painter's order (primer, sky,
+ * swirls, hills and cypress, star halos ring by ring, the moon, the village
+ * and its windows) and draws on when the coverage passes it.
+ *
  * Every constant is here; the ones in TUNE are live sliders (T).
  */
 export const PROFILE = {
@@ -106,6 +114,48 @@ export const PROFILE = {
   HALO: { ATTACK: 0.45, HOLD: 5, DECAY: 1.6, MAX: 1.2 },
   // phrase breaths (dips in the level) send a wave of light from the moon across the stars
   PHRASE: { DIP: 0.18, WINDOW: 2.5, MIN_GAP: 6, SPEED: 0.55, WIDTH: 0.35, AMP: 0.45 },
+
+  // ---- the painting paints itself: coverage(t) and the painter's order
+  REVEAL: {
+    COMPLETE_AT: null, // s the painting is finished; null = the main climax's peak from the analysis (3:44.2)
+    MIN_RATE: 0.12, // painting rate in silence, against loudness^EXPONENT (0..1): never stalls
+    EXPONENT: 1.3,
+    SMOOTH: 2, // s: the loudness rate is smoothed over this, so the painting never jumps
+    GESTURE: { AMP: 0.5, WIDTH: 0.35, GAP: 2.5 }, // the strongest bow attacks (top RIPPLE_SHARE): a burst of rate (Gaussian, s), at most one per GAP s
+    FALLBACK: 180, // s: without the analysis (mic, demo, other files) the live loudness paints it in about this long
+    LIVE_LEVEL: 0.5, // typical live drive the FALLBACK is reckoned with
+    // the painter's order, in coverage: when each part of the painting is painted
+    STAGES: {
+      PRIMER: [0.01, 0.04], // black, then a faint dark-blue primer wash
+      SKY: [0.04, 0.3], // broad dark-blue sky strokes, in patches across the canvas
+      SWIRLS: [0.3, 0.55], // the pale strokes: the great spiral and its partner growing outward, the wind bands
+      HILLS: [0.4, 0.56], // far hills first
+      CYPRESS: [0.48, 0.65], // from its base upward, like a flame
+      STARS: [0.55, 0.8], // halos ring by ring (outer to inner), a few stars at a time, golden centres last
+      MOON: [0.8, 0.92], // the moon, ring by ring, brightening
+      VILLAGE: [0.9, 0.97], // the houses and the church
+      WINDOWS: [0.95, 1], // the warm windows light up one by one, arriving with the climax
+    },
+    STAR_WINDOW: 0.3, // share of the STARS stage each star takes (they overlap: a few at a time)
+    RINGS: 4, // halo rings per star (and per moon: MOON_RINGS)
+    MOON_RINGS: 5,
+    HALO_SIZE: 2.2, // star halo extent in star radii (moon: MOON_SIZE)
+    MOON_SIZE: 2.4,
+    PALE: 0.55, // sky brighter than this share of the sky is pale paint (swirls, wind bands, halos)
+    VILLAGE_TOP: 0.26, // painting height the village stays under
+    PATCH: [0.16, 0.05], // painting heights: patch sizes the painter works across (coarse, fine)
+    JITTER: 0.025, // per-stroke rank jitter (rings and windows get a quarter of it)
+    GROW: [0.4, 1.2], // s a stroke takes to draw on (short ... long strokes)
+    WET: [3, 0.45], // fresh paint: seconds its sheen takes to settle, extra brightness
+    SOFT: 0.03, // coverage over which the underpainting settles in behind the strokes ...
+    LAG: 0.02, // ... starting this much coverage after them
+    PRIMER_COLOR: '#0f1a3a',
+    SKY_GROUND: '#22397a', // the ground laid under the sky's later layers (swirls, halos, moon, cypress)
+    LAND_GROUND: '#162229',
+    BUILD: { GLOW: 0.2, WARMTH: 0.25, EXPOSURE: 0.8 }, // glow / warmth / exposure share at coverage 0 (full at 1)
+    BLOOM: { RISE: 0.6, DECAY: 5, GLOW: 1.2, WARMTH: 0.35, EXPOSURE: 0.18 }, // golden light when the painting is finished
+    FADE_TO_BLACK: false, // the last bars dissolve the painting back toward black (in reverse order)
+  },
 
   // melody pitch height
   MELODY: {
@@ -182,4 +232,13 @@ export const TUNE = [
   ['EVENTS.RIPPLE_AMP', 'ripple strength', 0, 1, 0.01],
   ['EVENTS.MELODY_PULSE.1', 'halo bloom', 0.2, 2, 0.05],
   ['EVENTS.MELODY_RADIUS.1', 'bloom size', 0.5, 3, 0.05],
+  { group: 'painting itself (Shift+P replay, K finish)' },
+  ['REVEAL.MIN_RATE', 'quiet painting rate', 0, 1, 0.01],
+  ['REVEAL.EXPONENT', 'loudness exponent', 0.5, 3, 0.05],
+  ['REVEAL.GESTURE.AMP', 'bold gestures', 0, 2, 0.05],
+  ['REVEAL.GROW.0', 'draw-on short (s)', 0.1, 2, 0.05],
+  ['REVEAL.GROW.1', 'draw-on long (s)', 0.2, 3, 0.05],
+  ['REVEAL.WET.0', 'wet sheen (s)', 0.5, 8, 0.1],
+  ['REVEAL.WET.1', 'wet brightness', 0, 1, 0.01],
+  ['REVEAL.BLOOM.GLOW', 'finish bloom', 0, 3, 0.05],
 ];

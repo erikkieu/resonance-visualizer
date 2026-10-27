@@ -100,6 +100,15 @@
  * between the hush (the quietest 10 s of music) and the main climax (3:44),
  * warmth peaks near 3:44 and is clearly lower at the first climax (1:38),
  * and the ending settles (slow, calm blue). Screenshots only at FESTIVO_SHOTS.
+ *
+ *   npm run verify -- andante-festivo --reveal [--out dir]
+ *
+ * checks Scene 3 painting itself: the coverage curve over the whole piece
+ * (from the page, a pure function of the playhead): 0 at the start, never
+ * falling, faster where the piece is louder, 1 at the main climax and after.
+ * Then it seeks to REVEAL_TIMES and prints the live coverage, the painter's
+ * stage and the strokes painted, seeks back and forth to check the same
+ * playhead gives the same painting, and takes screenshots at REVEAL_SHOTS.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -155,6 +164,10 @@ const FESTIVO_STEP = 2; // s between samples while the whole piece plays
 const FESTIVO_SHOTS = [[10, 'opening'], [98, 'first-climax'], [224, 'main-climax'], [238, 'final-minute']];
 const FESTIVO_MAIN = 224; // s: the main climax's peak (3:44)
 const FESTIVO_FIRST = 98; // s: the first climax's peak (1:38)
+const REVEAL = args.includes('--reveal');
+const REVEAL_TIMES = [5, 30, 60, 98, 135, 165, 195, 224, 235]; // 0:05 0:30 1:00 1:38 2:15 2:45 3:15 3:44 3:55 (+ the end; the piece is 4:05, so no 4:30)
+const REVEAL_SHOTS = [5, 45, 98, 150, 210, 230]; // 0:05 0:45 1:38 2:30 3:30 3:50
+const REVEAL_SEEKS = [135, 224, 60, 135, 200, 60]; // back and forth: every playhead twice
 const SMOOTH = args.includes('--smooth');
 const SMOOTH_WINDOWS = [[10, 'quiet'], [255, 'building'], [287, 'climax']].filter(([t]) => !flag('--windows') || flag('--windows').split(',').map(Number).includes(t)); // s, 5 s each (--windows 287 = only those)
 const SMOOTH_SHOTS = [160, 290, 350]; // s: 20 s of the 1:04 swell's melody: packets spawned against notes heard
@@ -167,7 +180,10 @@ const LEAD_IN = QUICK ? 2.5 : 4; // s of playback before each screenshot
 const SEQUENCE = { BEFORE: 8, AFTER: 3, STEP: 1 }; // s around the biggest climax
 const VIEW = { width: 1280, height: 720 };
 
-const fmt = (t) => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`;
+const fmt = (t) => {
+  const d = Math.round(t * 10); // tenths, so 59.96 s prints 1:00.0, not 0:60.0
+  return `${Math.floor(d / 600)}:${((d % 600) / 10).toFixed(1).padStart(4, '0')}`;
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
@@ -304,6 +320,16 @@ async function verifyPiece(browser, url, piece) {
     const fps = await page.evaluate(() => window.__resonance.fps);
     fs.writeFileSync(path.join(dir, 'festivo-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
     console.log(`  fps ${fps.toFixed(1)} (lowest 2-s sample ${result.minFps.toFixed(0)}) · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
+    console.log(`  -> ${dir}`);
+    await page.close();
+    return;
+  }
+
+  if (REVEAL) {
+    const result = await revealPass(page, dir, seekAndPlay, analysis);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    fs.writeFileSync(path.join(dir, 'reveal-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
+    console.log(`  fps ${fps.toFixed(1)} (lowest sample ${result.minFps.toFixed(0)}) · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
     console.log(`  -> ${dir}`);
     await page.close();
     return;
@@ -1449,6 +1475,102 @@ async function festivoPass(page, dir, seekAndPlay, analysis) {
   }
   const minFps = Math.min(...S.map((s) => s.fps));
   return { samples: S, hush, first, main, warmest, ending, ratios, checks, shots, minFps };
+}
+
+/**
+ * Scene 3 painting itself: the coverage curve (pure), the live coverage at
+ * REVEAL_TIMES, a seek test and the screenshots at REVEAL_SHOTS.
+ */
+async function revealPass(page, dir, seekAndPlay, analysis) {
+  const dur = analysis.duration;
+  const scene = () => page.evaluate(() => ({ ...window.__resonance.manager.current.scene.reveal, t: window.__resonance.perf.t, fps: window.__resonance.fps }));
+  await seekAndPlay(1, 0.5); // the scene prepares the curve from the score
+  const curve = await page.evaluate((d) => {
+    const sc = window.__resonance.manager.current.scene;
+    const out = [];
+    for (let t = 0; t <= d; t += 1) out.push(sc.coverAt(t));
+    return out;
+  }, dur);
+  const info = await scene();
+  // the level, mean per second
+  const lv = analysis.level;
+  const r = analysis.frameRate;
+  const level = curve.map((_, t) => {
+    let sum = 0;
+    let c = 0;
+    for (let i = Math.floor(t * r); i < Math.min(lv.length, Math.floor((t + 1) * r)); i++, c++) sum += lv[i];
+    return c ? sum / c : 0;
+  });
+  const done = info.completeAt;
+  const rate = curve.slice(1).map((c, i) => c - curve[i]);
+  const building = rate.map((d, t) => [d, level[t]]).filter((_, t) => t + 1 <= done);
+  const byLevel = [...building].sort((a, b) => a[1] - b[1]);
+  const q = Math.floor(byLevel.length / 4);
+  const meanOf = (rows, k) => rows.reduce((a, x) => a + x[k], 0) / Math.max(1, rows.length);
+  const quietRate = meanOf(byLevel.slice(0, q), 0);
+  const loudRate = meanOf(byLevel.slice(-q), 0);
+  const mx = meanOf(building, 0);
+  const my = meanOf(building, 1);
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+  for (const [x, y] of building) {
+    sxy += (x - mx) * (y - my);
+    sxx += (x - mx) ** 2;
+    syy += (y - my) ** 2;
+  }
+  const corr = sxy / Math.sqrt(sxx * syy);
+  const maxStep = Math.max(...rate.filter((_, t) => t + 1 <= done));
+  const minStep = Math.min(...rate.filter((_, t) => t + 1 <= done));
+  console.log(`  curve: completes at ${fmt(done)} · ${info.gestures} bold gestures (${(info.gestureShare * 100).toFixed(0)} % of the paint) · per second ${(minStep * 100).toFixed(2)}-${(maxStep * 100).toFixed(2)} % · quiet quarter ${(quietRate * 100).toFixed(2)} %/s, loud quarter ${(loudRate * 100).toFixed(2)} %/s · corr(rate, level) ${corr.toFixed(2)}`);
+
+  const lvEnd = analysis.level;
+  let last = lvEnd.length - 1;
+  while (last > 0 && lvEnd[last] < 0.05) last--;
+  const musicEnd = last / r;
+  const rows = [];
+  console.log('     time  coverage  stage                 painted / total     rate %/s  fps');
+  for (const t of [...REVEAL_TIMES, Math.floor(musicEnd)]) {
+    await seekAndPlay(t, 1.5);
+    const s = await scene();
+    rows.push(s);
+    console.log(`  ${fmt(s.t).padStart(7)}  ${(s.cover * 100).toFixed(1).padStart(6)} %  ${s.stage.padEnd(20)}  ${String(s.painted).padStart(6)} / ${s.total}    ${s.rate.toFixed(2).padStart(5)}    ${s.fps.toFixed(0)}`);
+  }
+  const seeks = [];
+  for (const t of REVEAL_SEEKS) {
+    await seekAndPlay(t, 0.3);
+    const s = await scene();
+    const pure = await page.evaluate((tt) => window.__resonance.manager.current.scene.coverAt(tt), s.t);
+    seeks.push({ t, at: s.t, cover: s.cover, pure });
+  }
+  const seekErr = Math.max(...seeks.map((s) => Math.abs(s.cover - s.pure)));
+  const pairs = {};
+  for (const s of seeks) (pairs[s.t] ??= []).push(s.cover);
+  const pairErr = Math.max(...Object.values(pairs).map((v) => Math.max(...v) - Math.min(...v)));
+  console.log(`  seeks ${REVEAL_SEEKS.map(fmt).join(' -> ')}: live vs pure max ${pairErr.toExponential(1)} / ${seekErr.toExponential(1)} (same playhead twice: ${Object.entries(pairs).map(([t, v]) => `${fmt(Number(t))} ${v.map((c) => (c * 100).toFixed(2)).join('/')} %`).join(' · ')})`);
+
+  const ok = (b) => (b ? 'PASS' : 'FAIL');
+  const checks = {
+    start: curve[0] <= 0.001,
+    monotonic: minStep >= 0,
+    louder: loudRate >= 1.5 * quietRate && corr > 0.5,
+    complete: Math.abs(curve[Math.ceil(done)] - 1) < 1e-6 && curve[Math.floor(done) - 1] < 1,
+    holds: curve.slice(Math.ceil(done)).every((c) => c === 1),
+    seek: pairErr < 0.005 && seekErr < 0.005,
+  };
+  console.log(`  ${ok(checks.start)} 0 at the start · ${ok(checks.monotonic)} never falls · ${ok(checks.louder)} faster when louder · ${ok(checks.complete)} 1.0 at the main climax · ${ok(checks.holds)} holds after · ${ok(checks.seek)} seek-safe`);
+
+  const shots = [];
+  for (const t of REVEAL_SHOTS) {
+    await seekAndPlay(t, 4);
+    const s = await scene();
+    const file = path.join(dir, `reveal-${fmt(t).replace(':', 'm')}.png`);
+    await page.screenshot({ path: file });
+    shots.push({ t, file, cover: s.cover, stage: s.stage });
+    console.log(`  shot ${fmt(t)}: ${(s.cover * 100).toFixed(1)} % · ${s.stage}`);
+  }
+  const minFps = Math.min(...rows.map((s) => s.fps));
+  return { curve, completeAt: done, corr, quietRate, loudRate, rows, seeks, checks, shots, minFps };
 }
 
 /** Sky clock units per second of playhead at the fastest sample (a bound for the seek check). */

@@ -17,6 +17,7 @@ import { createTimeline } from './timeline.js';
  * min, max, step, get(), set(v) }], built once per scene (the rows above are
  * rewritten ~15 times a second, a slider must survive that) and kept in step
  * with get() while not being dragged (keys may change the value too).
+ * An entry { label, action() } is a button instead.
  */
 export function createDebugOverlay({ audio, manager }) {
   const el = document.createElement('div');
@@ -52,6 +53,14 @@ export function createDebugOverlay({ audio, manager }) {
     controlScene = scene;
     nodes.controls.innerHTML = '';
     controls = (scene?.debugControls ?? []).map((c) => {
+      if (c.action) {
+        const button = document.createElement('button');
+        button.className = 'debug-button';
+        button.textContent = c.label;
+        button.addEventListener('click', () => c.action());
+        nodes.controls.appendChild(button);
+        return null;
+      }
       const row = document.createElement('label');
       row.className = 'debug-row debug-control';
       row.innerHTML = `<b>${c.label}</b><input type="range" min="${c.min}" max="${c.max}" step="${c.step}"><span></span>`;
@@ -61,7 +70,7 @@ export function createDebugOverlay({ audio, manager }) {
       input.addEventListener('input', () => c.set(Number(input.value)));
       nodes.controls.appendChild(row);
       return { c, input, out };
-    });
+    }).filter(Boolean);
   }
 
   let last = 0;

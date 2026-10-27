@@ -127,8 +127,8 @@ function boot() {
       ui.toggleHidden();
     } else if (k === 'd') {
       debug.toggle();
-    } else if (k === 'p') {
-      ui.playScenePiece();
+    } else if (k === 'p' && !e.shiftKey) {
+      ui.playScenePiece(); // (Shift+P is the scene's own: Scene 3 replays its painting)
     } else if (k === ' ') {
       e.preventDefault();
       ui.togglePlay();
