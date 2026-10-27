@@ -699,6 +699,23 @@ input[type='range']::-moz-range-thumb {
   accent-color: var(--accent);
 }
 
+/* ... and its buttons */
+.debug-button {
+  pointer-events: auto;
+  margin: 4px 6px 0 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.debug-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .debug-title {
   display: flex;
   justify-content: space-between;

@@ -44,8 +44,8 @@ Microphone input needs a secure context, so use `localhost` or HTTPS. GitHub Pag
 - **D**: debug overlay for live tuning. It shows pitch height (with its frequency, peak-vs-centroid confidence and adaptive range), loudness, the dominant note with 12-bin chroma, and the scene's values. For Scene 1 that includes a swatch of the colour new paint is getting. It stays visible when the rest of the UI hides.
 - **Space**: play or pause the loaded file
 - **Drag on the canvas** (Scene 1): pour paint with the mouse or a finger
-- **Move the mouse** (Scene 3): push the brush strokes aside
 - **Move the mouse** (Scene 5): camera parallax
+- **Shift+P / K** (Scene 3): replay the painting from black (the piece restarts) / show the finished painting
 
 The UI auto-hides after 3 s without mouse movement and comes back when you move the mouse.
 
@@ -167,12 +167,14 @@ A living oil painting, tuned for Schubert/Liszt *Ständchen*. The reference is V
 
 Each frame runs these passes:
 1. **`flow.frag`**: a flow field from the stream function of Gaussian vortices (the great spiral, every star, the moon) plus light curl noise. The village is almost still; the sky turns.
-2. **`state.frag`**: up to 60,000 strokes live in a float texture (position, age, life). They drift along the flow, age, and respawn in their home region. The mouse pushes them aside.
+2. **`state.frag`**: up to 60,000 strokes live in a float texture (position, age, life). They drift along the flow, age, and respawn in their home region.
 3. **`canvas.frag`**: a persistent paint buffer that smears along the flow and slowly relaxes back to the painting.
 4. **Strokes**: instanced, tapered, bent quads (`stroke.vert` / `stroke.frag`) coloured from the painting, laid onto the paint buffer. Strokes that stray from their region fade out, so the cypress and village keep their shapes. Onset bursts (`burst.vert`) add short-lived fans of strokes.
 5. **`final.frag`**: impasto lighting from the paint's luminance, canvas weave, note tint, warm glows from a mipmapped light mask (stars, moon, village windows), onset halo pulses, treble twinkle and a vignette.
 
 The landscape (cypress sway, hills and village with lit windows) is part of the same pipeline: a mask (`mask.frag`, baked once) marks the regions so each can move at its own pace.
+
+**The painting paints itself.** With the *Andante Festivo* playing, the scene starts from a black canvas and is painted stroke by stroke over the piece, finished at the main climax (3:44). The painter goes in order: a primer wash, then the dark sky in patches, the pale swirls growing outward, the hills, the cypress from its base, the star halos ring by ring, the moon, and finally the village with its windows lighting up one by one. Louder passages paint faster: coverage is the integral of the loudness over the piece. Each stroke draws on with a wet sheen that settles as it dries. Everything follows the playhead, so seeking shows the painting as it is at that moment. Without the piece's analysis, the live loudness paints it in about three minutes. The settings live in `REVEAL` in `profiles/andanteFestivo.js`.
 
 **Music mapping** (all in the `CONFIG` object at the top of `Scene3StarryNight.js`):
 - **Speed from `level`**: about 0.25× when quiet and 1× at mid level. Above 0.8 the scene enters a swell of up to 2.5× and stays in it until the level drops below 0.6 (hysteresis). Changes are smoothed over ~1.8 s. At the very lowest level the motion nearly freezes and the stars dim.

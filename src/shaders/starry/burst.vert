@@ -9,6 +9,9 @@ uniform vec4 uBursts[BURSTS];   // x, y, radius, birth time
 uniform vec3 uBurstColors[BURSTS];
 uniform float uBurstAmp[BURSTS]; // opacity: melody blooms ~1, accompaniment ripples faint
 uniform float uRealTime;
+uniform float uFadeIn;          // s: blooms swell in, never flash
+varying float vHead; // (shared fragment shader) bursts are always fully drawn ...
+varying float vWet;  // ... and carry no wet sheen
 varying vec2 vLocal;
 varying vec3 vColor;
 varying float vAlpha;
@@ -22,6 +25,8 @@ void main() {
   float seed = hash11(float(id) * 0.7548 + 0.11);
   vSeed = seed;
   vLocal = position.xy;
+  vHead = 1.0;
+  vWet = 0.0;
   if (age < 0.0 || age >= BURST_LIFE) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     vColor = vec3(0.0);
@@ -45,5 +50,5 @@ void main() {
   // clamp: at the very end of a life float error can make 1 - t slightly
   // negative, and pow() of a negative base is NaN (which would poison the canvas)
   float t = clamp(age / BURST_LIFE, 0.0, 1.0);
-  vAlpha = 0.9 * uBurstAmp[k] * smoothstep(0.0, 0.06, age) * pow(1.0 - t, 1.5);
+  vAlpha = 0.9 * uBurstAmp[k] * smoothstep(0.0, uFadeIn, age) * pow(1.0 - t, 1.5);
 }
