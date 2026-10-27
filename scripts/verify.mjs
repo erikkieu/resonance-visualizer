@@ -36,6 +36,22 @@
  * span the melody layer spawns about one packet per melody note and the low
  * layer far fewer, slower ones, (b) packets travel monotonically frame to
  * frame, (c) activity is low when quiet, peaks at 4:50 and is lower at 5:11.
+ * It also prints the night progression (night / dawn, PROFILE.NIGHT) at each
+ * time, shoots 0:10 and 1:20 too (dusk), and checks that the night deepens
+ * up to 4:50, is deepest there, and that dawn only rises after it.
+ *
+ *   npm run verify -- standchen --smooth [--out dir]
+ *
+ * measures Scene 2's aurora noise: for 5 s windows (quiet, building,
+ * climax), with the stars hidden so only the aurora moves, in both the
+ * previous look and the clean one (AURORA.NOISE, key N), it reads back every
+ * frame of the sky above the mountains (downsampled) and computes (a)
+ * flicker = mean |frame-to-frame luminance change| (includes the waves' real
+ * travel), temporal noise = mean |Y(t) - (Y(t-1) + Y(t+1)) / 2| (~0 for smooth
+ * motion, large for boiling or strobing) and (b) grain = mean
+ * |Laplacian| of the luminance, plus mean luminance, chroma and the p98
+ * highlight (each look twice, A B B A, averaged). Checks both drop >= 40 % while luminance, chroma and highlights
+ * stay within 10 %; then shoots 2:40, 4:50 and 5:50 in the clean look.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -58,11 +74,14 @@ const JOURNEY_SHOTS = [10, 137, 270, 347, 425];
 const JOURNEY_CLIMAXES = [137, 347]; // should stand out against their neighbours
 const AURORA = args.includes('--aurora');
 const AURORA_TIMES = [10, 80, 160, 205, 260, 290, 311, 350]; // 0:10 1:20 2:40 3:25 4:20 4:50 5:11 5:50
-const AURORA_SHOTS = [160, 260, 290, 350];
+const AURORA_SHOTS = [10, 80, 160, 260, 290, 350];
 const AURORA_SEQ = 75; // s: 5 frames over 1 s of the 1:04 swell's melody
 const AURORA_QUIET = [10, 205, 350]; // intro, the 3:20-3:35 release, the fade
-const AURORA_TRACE = [64, 84]; // s: 20 s of the 1:04 swell's melody: packets spawned against notes heard
-const only = args.filter((a, i) => !a.startsWith('--') && !['--out', '--seq'].includes(args[i - 1]));
+const AURORA_TRACE = [64, 84];
+const SMOOTH = args.includes('--smooth');
+const SMOOTH_WINDOWS = [[10, 'quiet'], [255, 'building'], [287, 'climax']].filter(([t]) => !flag('--windows') || flag('--windows').split(',').map(Number).includes(t)); // s, 5 s each (--windows 287 = only those)
+const SMOOTH_SHOTS = [160, 290, 350]; // s: 20 s of the 1:04 swell's melody: packets spawned against notes heard
+const only = args.filter((a, i) => !a.startsWith('--') && !['--out', '--seq', '--windows'].includes(args[i - 1]));
 const SEQ = flag('--seq', '')
   .split(',')
   .filter(Boolean)
@@ -167,6 +186,16 @@ async function verifyPiece(browser, url, piece) {
     const result = await auroraPass(page, dir, seekAndPlay, state, analysis);
     const fps = await page.evaluate(() => window.__resonance.fps);
     fs.writeFileSync(path.join(dir, 'aurora-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
+    console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
+    console.log(`  -> ${dir}`);
+    await page.close();
+    return;
+  }
+
+  if (SMOOTH) {
+    const result = await smoothPass(page, dir, seekAndPlay);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    fs.writeFileSync(path.join(dir, 'smooth-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
     console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
     console.log(`  -> ${dir}`);
     await page.close();
@@ -371,7 +400,7 @@ async function auroraPass(page, dir, seekAndPlay, state, analysis) {
   const playTo = (t) => page.waitForFunction((t) => window.__resonance.perf.t >= t, t, { timeout: 120000, polling: 50 });
   const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
   const rows = [];
-  console.log('    time   amp   packets low/mel  melody h  low note  activity  lum    fps');
+  console.log('    time   amp   packets low/mel  melody h  low note  activity  lum    night dawn  fps');
   let prev = -Infinity;
   for (const t of AURORA_TIMES) {
     // close samples play straight through: a seek restarts the climax envelope, so 5:11 must follow 4:50
@@ -385,10 +414,10 @@ async function auroraPass(page, dir, seekAndPlay, state, analysis) {
     const a = await aurora();
     const file = AURORA_SHOTS.includes(t) ? path.join(dir, `aurora-${fmt(t).replace(':', 'm')}.png`) : null;
     const f = await frameStats(page, file);
-    const row = { t, amp: a.amp, low: mean((x) => x.low.active), melody: mean((x) => x.melody.active), melodyHeight: a.melodyHeight, lowNote: a.lowNote, activity, lum: f.lum, fps: st.fps, stage: st.stage, file };
+    const row = { t, amp: a.amp, low: mean((x) => x.low.active), melody: mean((x) => x.melody.active), melodyHeight: a.melodyHeight, lowNote: a.lowNote, activity, lum: f.lum, night: a.night, dawn: a.dawn, nightSource: a.nightSource, fps: st.fps, stage: st.stage, file };
     rows.push(row);
     console.log(
-      `  ${fmt(t).padStart(7)}  ${a.amp.toFixed(2)}   ${row.low.toFixed(1).padStart(4)} / ${row.melody.toFixed(1).padEnd(5)}     ${a.melodyHeight.toFixed(2)}      ${(a.lowNote >= 0 ? names[a.lowNote] : '-').padEnd(3)}      ${activity.toFixed(2).padStart(5)}    ${f.lum.toFixed(3)}  ${st.fps.toFixed(0)}  ${st.stage}${file ? '  [shot]' : ''}`,
+      `  ${fmt(t).padStart(7)}  ${a.amp.toFixed(2)}   ${row.low.toFixed(1).padStart(4)} / ${row.melody.toFixed(1).padEnd(5)}     ${a.melodyHeight.toFixed(2)}      ${(a.lowNote >= 0 ? names[a.lowNote] : '-').padEnd(3)}      ${activity.toFixed(2).padStart(5)}    ${f.lum.toFixed(3)}  ${a.night.toFixed(2)}  ${a.dawn.toFixed(2)}  ${st.fps.toFixed(0)}  ${st.stage}${file ? '  [shot]' : ''}`,
     );
   }
 
@@ -457,12 +486,146 @@ async function auroraPass(page, dir, seekAndPlay, state, analysis) {
     peaksAtClimax: rows.every((r) => r.activity <= peak + 1e-3) && rows.every((r) => r.amp <= at(290).amp + 1e-3),
     lowerAfter: at(311).activity < peak && at(311).amp < 0.8 * at(290).amp,
     neverBlank: rows.every((r) => r.amp > 0.04),
+    // the night: deepens up to the climax, deepest there, dawn only after it
+    nightDeepens: rows.filter((r) => r.t <= 290).every((r, i, a) => i === 0 || r.night > a[i - 1].night) && rows.every((r) => r.night <= at(290).night + 1e-3),
+    dawnAfter: rows.every((r) => (r.t <= 290 ? r.dawn < 0.02 : true)) && at(350).dawn > 0.3 && at(350).night < at(290).night - 0.2,
+    nightTimeline: rows.every((r) => r.nightSource === 'score'),
   };
   const ok = (v) => (v ? 'PASS' : 'FAIL');
   console.log(`  (a) melody ${span.melodySpawned}/${span.melodyNotes} notes -> ${ok(checks.melodyPerNote)} one per note · low ${span.lowSpawned} -> ${ok(checks.lowFewer)} far fewer · ${ok(checks.lowSlower)} slower`);
   console.log(`  (b) ${ok(checks.travels)} packets travel monotonically`);
   console.log(`  (c) quiet (0:10, 3:25, 5:50) max activity ${quiet.toFixed(2)} vs 4:50 ${peak.toFixed(2)} -> ${ok(checks.quietLow)} low · ${ok(checks.peaksAtClimax)} peaks at 4:50 · 5:11 ${at(311).activity.toFixed(2)} (amp ${((at(311).amp / at(290).amp) * 100).toFixed(0)} %) -> ${ok(checks.lowerAfter)} lower · ${ok(checks.neverBlank)} never blank`);
+  console.log(`  night: ${rows.map((r) => `${fmt(r.t)} ${r.night.toFixed(2)}/${r.dawn.toFixed(2)}`).join(' · ')} -> ${ok(checks.nightDeepens)} deepens to 4:50 · ${ok(checks.dawnAfter)} dawn after · ${ok(checks.nightTimeline)} from the timeline`);
   return { rows, span, travel: { checked: travel.checked, wrong: travel.wrong }, seq, checks };
+}
+
+/**
+ * Every frame for `ms`, read back the sky above the mountains (top 38 % of
+ * the canvas, downsampled to 320 px wide) right after the scene has drawn it,
+ * and return flicker, grain, luminance, chroma and the p98 highlight.
+ */
+function measureNoise(page, ms) {
+  return page.evaluate(
+    (ms) =>
+      new Promise((done) => {
+        const src = window.__resonance.renderer.domElement;
+        const W = 320;
+        const sh = Math.round(src.height * 0.38);
+        const H = Math.round((W * sh) / src.width);
+        const c = document.createElement('canvas');
+        c.width = W;
+        c.height = H;
+        const g = c.getContext('2d', { willReadFrequently: true });
+        const lin = new Float32Array(256).map((_, i) => (i / 255 <= 0.04045 ? i / 255 / 12.92 : ((i / 255 + 0.055) / 1.055) ** 2.4));
+        let prev = null;
+        let prev2 = null;
+        const acc = { frames: 0, flicker: 0, boil: 0, grain: 0, lum: 0, chroma: 0, p98: 0 };
+        const t0 = performance.now();
+        const tick = () => {
+          g.drawImage(src, 0, 0, src.width, sh, 0, 0, W, H);
+          const px = g.getImageData(0, 0, W, H).data;
+          const Y = new Float32Array(W * H);
+          let lum = 0;
+          let chroma = 0;
+          for (let i = 0; i < W * H; i++) {
+            const r = lin[px[4 * i]];
+            const gr = lin[px[4 * i + 1]];
+            const b = lin[px[4 * i + 2]];
+            Y[i] = 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+            lum += Y[i];
+            chroma += Math.max(r, gr, b) - Math.min(r, gr, b);
+          }
+          let lap = 0;
+          for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+            const i = y * W + x;
+            lap += Math.abs(4 * Y[i] - Y[i - 1] - Y[i + 1] - Y[i - W] - Y[i + W]);
+          }
+          if (prev) {
+            let d = 0;
+            for (let i = 0; i < W * H; i++) d += Math.abs(Y[i] - prev[i]);
+            acc.flicker += d / (W * H);
+          }
+          if (prev2) {
+            // temporal second difference: ~0 for smooth motion, large for boiling / strobing
+            let d2 = 0;
+            for (let i = 0; i < W * H; i++) d2 += Math.abs(prev[i] - 0.5 * (Y[i] + prev2[i]));
+            acc.boil += d2 / (W * H);
+          }
+          prev2 = prev;
+          const sorted = Y.slice().sort();
+          acc.p98 += sorted[Math.floor(0.98 * sorted.length)];
+          acc.grain += lap / ((W - 2) * (H - 2));
+          acc.lum += lum / (W * H);
+          acc.chroma += chroma / (W * H);
+          acc.frames++;
+          prev = Y;
+          if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+          else {
+            const n = acc.frames;
+            done({ frames: n, flicker: acc.flicker / (n - 1), boil: acc.boil / (n - 2), grain: acc.grain / n, lum: acc.lum / n, chroma: acc.chroma / n, p98: acc.p98 / n, fps: window.__resonance.fps });
+          }
+        };
+        requestAnimationFrame(tick);
+      }),
+    ms,
+  );
+}
+
+async function smoothPass(page, dir, seekAndPlay) {
+  const setLook = (clean, hideStars) =>
+    page.evaluate(([clean, hideStars]) => {
+      const sc = window.__resonance.manager.current.scene;
+      sc.clean = clean;
+      sc.hideStars = hideStars;
+      sc.seed = 0x2f6e2b1; // the same packet positions for both looks
+    }, [clean, hideStars]);
+  const rows = [];
+  console.log('    window              look      flicker  grain    lum     chroma  p98     fps');
+  for (const [t, name] of SMOOTH_WINDOWS) {
+    const row = { t, name };
+    // A B B A: each look measured twice, in alternating order, and averaged (playback varies run to run)
+    const runs = { previous: [], clean: [] };
+    for (const look of ['previous', 'clean', 'clean', 'previous']) {
+      await setLook(look === 'clean', true);
+      await seekAndPlay(t, 4);
+      runs[look].push(await measureNoise(page, 5000));
+    }
+    for (const look of ['previous', 'clean']) {
+      const [a, b] = runs[look];
+      const m = Object.fromEntries(Object.keys(a).map((k) => [k, (a[k] + b[k]) / 2]));
+      row[look] = m;
+      console.log(`  ${fmt(t).padStart(7)}-${fmt(t + 5)} ${name.padEnd(9)} ${look.padEnd(9)} ${(m.flicker * 1e4).toFixed(2).padStart(6)}  ${(m.grain * 1e4).toFixed(2).padStart(6)}  ${m.lum.toFixed(4)}  ${m.chroma.toFixed(4)}  ${m.p98.toFixed(4)}  ${m.fps.toFixed(0)}`);
+    }
+    const o = row.previous;
+    const c = row.clean;
+    row.flickerDrop = 1 - c.flicker / o.flicker;
+    row.boilDrop = 1 - c.boil / o.boil;
+    row.relFlickerDrop = 1 - c.flicker / c.lum / (o.flicker / o.lum); // per unit of light
+    row.grainDrop = 1 - c.grain / o.grain;
+    row.lumRatio = c.lum / o.lum;
+    row.chromaRatio = c.chroma / o.chroma;
+    row.p98Ratio = c.p98 / o.p98;
+    console.log(`  ${''.padStart(25)} -> flicker ${(row.flickerDrop * 100).toFixed(0)} % less (${(row.relFlickerDrop * 100).toFixed(0)} % per unit of light) · temporal noise ${(row.boilDrop * 100).toFixed(0)} % less · grain ${(row.grainDrop * 100).toFixed(0)} % less · lum ${(row.lumRatio * 100).toFixed(0)} % · chroma ${(row.chromaRatio * 100).toFixed(0)} % · p98 ${(row.p98Ratio * 100).toFixed(0)} %`);
+    rows.push(row);
+  }
+  await setLook(true, false);
+  const shots = [];
+  for (const t of flag('--windows') ? [] : SMOOTH_SHOTS) {
+    await seekAndPlay(t);
+    const file = path.join(dir, `smooth-${fmt(t).replace(':', 'm')}.png`);
+    await page.screenshot({ path: file });
+    shots.push(file);
+  }
+  const checks = {
+    flicker: rows.every((r) => r.flickerDrop >= 0.4),
+    temporalNoise: rows.every((r) => r.boilDrop >= 0.4),
+    grain: rows.every((r) => r.grainDrop >= 0.4),
+    brightness: rows.every((r) => r.lumRatio >= 0.9 && r.p98Ratio >= 0.9), // (not shrinking: brighter is fine)
+    colour: rows.every((r) => r.chromaRatio >= 0.9),
+  };
+  const ok = (v) => (v ? 'PASS' : 'FAIL');
+  console.log(`  ${ok(checks.flicker)} flicker -40 % · ${ok(checks.temporalNoise)} temporal noise -40 % · ${ok(checks.grain)} grain -40 % · ${ok(checks.brightness)} brightness not down > 10 % · ${ok(checks.colour)} colour range kept · shots ${SMOOTH_SHOTS.map(fmt).join(', ')}`);
+  return { rows, shots, checks };
 }
 
 main().catch((err) => {

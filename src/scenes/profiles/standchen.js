@@ -173,6 +173,65 @@ export const PROFILE = {
       SKY: 0, // the bare sky gets a faint stroke texture too
       CENTRE: [0.5, 1.5], // swirl centre the strokes curve around (screen x, height)
     },
+
+    // noise reduction: the aurora reads as smooth, silky light (N toggles the previous look)
+    NOISE: {
+      CLEAN: true, // false = the previous look (N in the scene)
+      OCTAVES: 2, // ray noise octaves along the curtains (previous: 1 at full contrast)
+      FREQUENCY: 0.55, // × each layer's STRIATION: longer, softer rays
+      RAY_CONTRAST: 0.32, // 0 = plain sheet, 1 = deep ray gaps (previous: 0.55 + 0.25 × treble)
+      EDGE: 1.35, // curtain edge softness (× sheet thickness)
+      BLUR: 4.5, // px, 3×3 tent blur of the aurora layer before compositing (previous: 2.5 px, 5 taps)
+      // every audio value feeding the aurora (bass, mid, treble, energy, surge) follows with
+      // attack / release (s) through a soft dead-band; row hues follow HUE (s) instead of jumping per note
+      SMOOTH: { ATTACK: 0.25, RELEASE: 0.9, DEADBAND: 0.04, HUE: 0.6, SURGE_ATTACK: 0.08 }, // (the accent surge decays smoothly by itself: it only needs a soft rise)
+      SPAWN: { MIN_GAP: 0.1, STEP: 0.3 }, // s between packets per layer (at least); max strength change from one packet to the next
+      SHIMMER: { AMP: 0.12, TIME: 1.5 }, // treble -> ray contrast: gentle, slow (s)
+      GAIN: 1, // × aurora brightness in the clean look (its softer rays let ~10 % more light through; 0.88 matches the previous level)
+      DITHER: 0.4, // final dither amplitude in 1/255 steps, fixed pattern (previous: 1, re-seeded every frame)
+    },
+  },
+
+  // ------------------------------------------------------- the night progression
+  // Across the piece the night moves from late dusk through deepest night (the
+  // 4:50 climax) toward the first light of dawn. `night` 0..1 (0 = twilight,
+  // 1 = deepest night) and `dawn` 0..1 (the pre-dawn glow) follow KEYS, a
+  // hand-authored timeline sampled at the score playhead with monotone cubic
+  // interpolation (no overshoot between keys). Without a score (mic, unknown
+  // file, demo) they ping-pong over LOOP s instead. landscape.frag turns them
+  // into the sky gradient, the horizon glow, the star field, the Milky Way, the
+  // water and the aurora's strength. Colours are linear RGB.
+  NIGHT: {
+    // [time s, night, dawn]
+    KEYS: [
+      [0, 0.15, 0], // late twilight: deep blue sky, a warm band on the horizon, only bright stars
+      [90, 0.4, 0], // twilight ending: the glow shrinks and cools to teal, more stars
+      [180, 0.75, 0], // full night: black-blue sky, the full star field
+      [290, 1.0, 0], // the climax: the darkest, clearest sky, faint stars and the Milky Way
+      [320, 0.85, 0.1], // dawn begins to stir at the far horizon
+      [365, 0.35, 0.7], // pre-dawn: a pale blue to rose glow, stars thinning from the horizon up
+    ],
+    LOOP: 360, // s, the fallback cycle (dusk -> night -> dawn -> back)
+    SMOOTHING: 1.5, // s (seeks jump at once)
+    SKY: {
+      // [horizon, zenith] at night 0 and at night 1 (mixed by night)
+      DUSK: [[0.02, 0.05, 0.11], [0.012, 0.03, 0.1]],
+      NIGHT: [[0.002, 0.009, 0.012], [0.007, 0.004, 0.016]],
+    },
+    // the low glow at dusk: warm (night 0) cooling to teal-blue, gone by night FADE
+    DUSK_GLOW: { WARM: [0.34, 0.12, 0.07], COOL: [0.03, 0.09, 0.12], COOL_AT: [0.15, 0.45], FADE: 0.62, HEIGHT: 0.09, STRENGTH: 1 },
+    // the pre-dawn glow (× dawn): rose at the horizon, pale blue above it
+    DAWN_GLOW: { LOW: [0.34, 0.14, 0.17], HIGH: [0.08, 0.14, 0.24], HEIGHT: 0.24, STRENGTH: 2.2 },
+    STARS: {
+      GAIN: [0.45, 1.25], // star brightness [night 0, night 1]
+      SHOWN: [0.05, 1], // share of the star field visible (brightest first) [night 0, night 1]
+      DAWN_REACH: 1.3, // at dawn 1 the stars are gone up to this share of the sky
+    },
+    MILKY_WAY: [0, 2.2], // band strength [night 0.55, night 1] (only a hint, at the darkest)
+    // the aurora: pale and faint at dusk, vivid at night, giving way to dawn
+    AURORA: { GAIN: [0.55, 1.0], SATURATION: [0.4, 1.0], DAWN_FADE: 0.45 },
+    WATER: [0.006, 0.014, 0.024], // base water colour at night 0 (night 1: almost black)
+    SNOW: 0.6, // how much the dusk / dawn glow lights the snow
   },
 };
 
@@ -204,4 +263,15 @@ export const TUNE = [
   ['AURORA.PAINT.STROKE', 'paint: strokes', 0, 1, 0.05],
   ['AURORA.PAINT.IMPASTO', 'paint: impasto', 0, 1, 0.05],
   ['AURORA.PAINT.SMEAR', 'paint: smear', 0, 0.04, 0.001],
+  ['AURORA.NOISE.BLUR', 'noise: blur (px)', 0, 8, 0.25],
+  ['AURORA.NOISE.RAY_CONTRAST', 'noise: ray contrast', 0, 1, 0.01],
+  ['AURORA.NOISE.FREQUENCY', 'noise: ray frequency', 0.2, 1.5, 0.05],
+  ['AURORA.NOISE.EDGE', 'noise: edge softness', 1, 2.5, 0.05],
+  ['AURORA.NOISE.SMOOTH.RELEASE', 'noise: audio release (s)', 0.1, 3, 0.05],
+  { group: 'night' },
+  ['NIGHT.DUSK_GLOW.STRENGTH', 'dusk glow', 0, 3, 0.05],
+  ['NIGHT.DAWN_GLOW.STRENGTH', 'dawn glow', 0, 3, 0.05],
+  ['NIGHT.MILKY_WAY.1', 'Milky Way (deepest night)', 0, 5, 0.1],
+  ['NIGHT.STARS.GAIN.1', 'stars (deepest night)', 0, 3, 0.05],
+  ['NIGHT.AURORA.DAWN_FADE', 'aurora fade at dawn', 0, 1, 0.05],
 ];

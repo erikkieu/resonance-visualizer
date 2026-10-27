@@ -9,6 +9,12 @@
 // the light dragged along each stroke, bristle lines and an impasto
 // highlight on the ridge of bright strokes; the bare sky shows a faint
 // trace of the same strokes, and is never covered (the light is added).
+// The night progression (uNight, uDawn; PROFILE.NIGHT) sets the sky: a deep
+// blue dusk with a warm band low in the west (left), cooling and sinking as
+// the night deepens; the black-blue deepest night with every star and a
+// hint of the Milky Way; then a pale blue to rose glow in the east (right)
+// as dawn comes, the stars thinning from the horizon upward. It also
+// lights the snow, darkens the water and sets the aurora's strength.
 // ---------------------------------------------------------------------------
 
 uniform sampler2D tAurora;
@@ -16,9 +22,24 @@ uniform vec4 uPaint;   // x = stroke amount, y = stroke length, z = stroke width
 uniform vec4 uPaint2;  // x = impasto, y = sky strokes, zw = swirl centre (screen x, height)
 uniform sampler2D tTerrain;
 uniform sampler2D tAmbient;
+uniform vec3 uSkyDusk[2];    // horizon, zenith at night 0
+uniform vec3 uSkyNight[2];   // horizon, zenith at night 1
+uniform vec3 uDuskWarm;      // the dusk glow, warm (night 0) ...
+uniform vec3 uDuskCool;      // ... cooling to teal-blue
+uniform vec4 uDuskGlow;      // xy = night range of the cooling, z = night where it is gone, w = strength
+uniform vec3 uDawnLow;       // the dawn glow at the horizon ...
+uniform vec3 uDawnHigh;      // ... and above it
+uniform vec4 uGlowHeight;    // x = dusk glow height, y = dawn glow height (view-ray y), z = dawn strength
+uniform vec4 uStars;         // x = brightness, y = share shown (brightest first), z = dawn reach
+uniform float uMilkyWay;
+uniform vec4 uNightAurora;   // x = aurora gain, y = saturation
+uniform vec3 uWater;         // base water colour at night 0
+uniform float uSnowGlow;
+uniform vec2 uAuroraBlur;    // x = radius px, y = 1: 3x3 tent (clean), 0: the previous 5 taps
 varying vec2 vUv;
 
-vec3 starField(vec2 uv) {
+// the stars: the brightest `shown` share of the field (fading in from the brightest down)
+vec3 starField(vec2 uv, float shown) {
   vec2 px = uv * uResolution;
   float scale = uResolution.y / 260.0; // cell size in pixels
   vec3 col = vec3(0.0);
@@ -32,12 +53,15 @@ vec3 starField(vec2 uv) {
       vec2 o = (h.xy - 0.5) * s * 0.7;
       float d = length(f - o);
       float b = (h.z - thresh) / (1.0 - thresh);
+      // the faint layer only shows in the second half of the night's stars
+      float sh = layer == 0 ? shown : clamp(2.0 * shown - 1.0, 0.0, 1.0);
+      float vis = smoothstep(1.0 - sh - 0.1, 1.0 - sh + 0.02, b);
       b = b * b * (layer == 0 ? 1.1 : 0.45);
       // twinkle: gentle always, sharper with treble
       float tw = 0.7 + 0.3 * sin(uTime * (1.5 + h.x * 4.0) + h.y * 40.0);
       tw *= 1.0 + uTreble * 0.9 * sin(uTime * 17.0 + h.x * 70.0);
       vec3 tint = mix(vec3(0.75, 0.85, 1.0), vec3(1.0, 0.92, 0.8), h.x);
-      col += tint * b * tw * exp(-d * d / (0.55 + b));
+      col += tint * b * tw * vis * exp(-d * d / (0.55 + b));
     }
   }
   return col;
@@ -74,7 +98,16 @@ vec3 paintedAurora(vec2 uv, out float stroke) {
   stroke = 0.5;
   if (uPaint.x <= 0.0 && uPaint2.x <= 0.0) {
     // painting off: smooth, continuous light (a soft blur hides the volume march's jitter grain)
-    vec2 o = 2.5 / uResolution;
+    vec2 o = uAuroraBlur.x / uResolution;
+    if (uAuroraBlur.y > 0.5) {
+      // 3x3 tent: a stable kernel, no shimmer
+      vec3 c = 0.25 * texture2D(tAurora, uv).rgb;
+      c += 0.125 * (texture2D(tAurora, uv + vec2(o.x, 0.0)).rgb + texture2D(tAurora, uv - vec2(o.x, 0.0)).rgb
+                  + texture2D(tAurora, uv + vec2(0.0, o.y)).rgb + texture2D(tAurora, uv - vec2(0.0, o.y)).rgb);
+      c += 0.0625 * (texture2D(tAurora, uv + o).rgb + texture2D(tAurora, uv - o).rgb
+                   + texture2D(tAurora, uv + vec2(o.x, -o.y)).rgb + texture2D(tAurora, uv + vec2(-o.x, o.y)).rgb);
+      return c;
+    }
     return 0.4 * texture2D(tAurora, uv).rgb
          + 0.15 * (texture2D(tAurora, uv + vec2(o.x, o.y)).rgb + texture2D(tAurora, uv + vec2(-o.x, o.y)).rgb
                  + texture2D(tAurora, uv + vec2(o.x, -o.y)).rgb + texture2D(tAurora, uv - o).rgb);
@@ -95,20 +128,44 @@ vec3 paintedAurora(vec2 uv, out float stroke) {
   return col;
 }
 
+// The low glow of dusk (west, left) and dawn (east, right) at view-ray height ry.
+vec3 horizonGlow(float ry, float x) {
+  float n = uNight;
+  float dusk = (1.0 - smoothstep(0.0, uDuskGlow.z, n)) * uDuskGlow.w;
+  vec3 duskCol = mix(uDuskWarm, uDuskCool, smoothstep(uDuskGlow.x, uDuskGlow.y, n));
+  float duskH = uGlowHeight.x * (1.0 - 0.5 * smoothstep(0.15, 0.5, n)); // it sinks as it fades
+  float west = 0.55 + 0.7 * exp(-pow((x - 0.2) / 0.55, 2.0));
+  vec3 col = duskCol * dusk * west * exp(-ry / duskH);
+  float dawnH = uGlowHeight.y * (0.5 + 0.7 * uDawn);
+  float east = 0.55 + 0.7 * exp(-pow((x - 0.8) / 0.55, 2.0));
+  col += mix(uDawnLow, uDawnHigh, smoothstep(0.0, dawnH, ry)) * uDawn * uGlowHeight.z * east * exp(-ry / dawnH);
+  return col;
+}
+
 // Everything above the water line, for screen position uv.
 vec3 above(vec2 uv, vec3 amb, float starGain) {
   vec3 rd = viewRay(uv);
   float y = uv.y - HORIZON;
   vec4 terrain = texture2D(tTerrain, uv);
+  float ry = max(rd.y, 0.0);
 
-  // sky gradient: deep teal-black at the horizon to dark purple overhead
+  // sky gradient, horizon -> zenith, from the deep blue of dusk to the black-blue of deepest night
   float h = clamp(rd.y / 0.55, 0.0, 1.0);
-  vec3 col = mix(vec3(0.004, 0.022, 0.026), vec3(0.022, 0.01, 0.04), smoothstep(0.0, 0.9, h));
-  col += vec3(0.0, 0.025, 0.02) * exp(-max(rd.y, 0.0) * 14.0); // airglow
-  col += vec3(0.02, 0.022, 0.03) * terrain.r;                   // Milky Way
-  col += starField(uv) * starGain * (1.0 + terrain.r * 1.5);
+  vec3 horizonCol = mix(uSkyDusk[0], uSkyNight[0], uNight);
+  vec3 zenithCol = mix(uSkyDusk[1], uSkyNight[1], uNight);
+  vec3 col = mix(horizonCol, zenithCol, smoothstep(0.0, 0.9, h));
+  col += vec3(0.0, 0.025, 0.02) * exp(-ry * 14.0) * (0.4 + 0.6 * uNight); // airglow
+  vec3 glow = horizonGlow(ry, uv.x);
+  col += glow;
+  col += vec3(0.02, 0.022, 0.03) * terrain.r * uMilkyWay;                 // Milky Way
+  // stars: fewer and dimmer at dusk; at dawn they thin from the horizon upward
+  float cut = uDawn * uStars.z;
+  float thin = mix(1.0, smoothstep(cut - 0.25, cut + 0.05, h), smoothstep(0.0, 0.1, uDawn)) * (1.0 - 0.5 * uDawn);
+  col += starField(uv, uStars.y) * starGain * uStars.x * thin * (1.0 + terrain.r * 1.5);
   float stroke;
   vec3 aurora = paintedAurora(uv, stroke);
+  // pale and faint at dusk, vivid at night, giving way to the dawn
+  aurora = mix(vec3(dot(aurora, vec3(0.2126, 0.7152, 0.0722))), aurora, uNightAurora.y) * uNightAurora.x;
   col *= 1.0 + uPaint2.y * (stroke - 0.5); // a faint trace of the strokes in the bare sky
   col += aurora;
 
@@ -118,7 +175,7 @@ vec3 above(vec2 uv, vec3 amb, float starGain) {
     col = mix(rock, vec3(0.05, 0.065, 0.08) + amb * 0.55, terrain.g);
   } else if (terrain.b > 0.25) {
     vec3 rock = vec3(0.01, 0.018, 0.025) + amb * 0.05;
-    vec3 snowCol = vec3(0.1, 0.13, 0.16) + amb * 0.9;
+    vec3 snowCol = vec3(0.1, 0.13, 0.16) + amb * 0.9 + horizonGlow(0.02, uv.x) * uSnowGlow; // dusk / dawn light on the snow
     col = mix(rock, snowCol, terrain.g);
     col = mix(col, vec3(0.012, 0.03, 0.036) + amb * 0.1, 0.25); // atmospheric haze
   }
@@ -144,7 +201,7 @@ float boulders(float x) {
 
 void main() {
   vec2 uv = vUv;
-  vec3 amb = texture2D(tAmbient, vec2(0.5)).rgb;
+  vec3 amb = texture2D(tAmbient, vec2(0.5)).rgb * uNightAurora.x;
   vec3 col;
 
   if (uv.y >= HORIZON) {
@@ -171,7 +228,7 @@ void main() {
 
     // fresnel-ish: grazing angles reflect more
     float fres = mix(0.8, 0.3, pow(depth, 0.7));
-    vec3 water = vec3(0.002, 0.008, 0.01);
+    vec3 water = mix(uWater, vec3(0.001, 0.004, 0.005), uNight);
     col = water + refl * fres;
     // thin bright ripple glints catch the aurora
     col += amb * 0.25 * smoothstep(0.55, 1.0, n0) * (1.0 - depth);

@@ -29,6 +29,7 @@ uniform vec4 uRowCurve;    // the curtain's arc (map units at the screen edges)
 uniform vec4 uRowStria;    // vertical ray frequency
 uniform float uGlow;       // faint light along every curtain (x amplitude)
 uniform float uTopScale;   // height the slices cover (tallest possible curtain)
+uniform vec4 uRay;         // x = octaves, y = frequency (× uRowStria), z = contrast, w = treble -> contrast
 varying vec2 vUv;
 
 const vec4 ROW_Z = vec4(7.5, 11.5, 16.0, 22.0);
@@ -74,9 +75,21 @@ void main() {
   float patchy = smoothstep(0.35, 0.9, vnoise(vec2(x * 0.06 + t * 0.03, fk * 5.0)));
   // (mostly continuous: the waves run along an unbroken curtain)
   float light = uGlow * (0.6 + 0.4 * patchy) + pick(uRowBright, fk) * w;
-  // vertical rays: fine for the melody, broad and gentle for the low layer
-  float rays = vnoise(vec2(x * pick(uRowStria, fk) - t * 0.25, fk * 3.0 + t * 0.05));
-  rays = mix(1.0, 0.25 + 1.1 * rays * rays, 0.55 + 0.25 * uTreble);
+  // vertical rays: fine for the melody, broad and gentle for the low layer; the
+  // pattern drifts along the curtain with the clock (advected, never re-seeded)
+  float rays = 0.0;
+  float norm = 0.0;
+  float a = 1.0;
+  float f = pick(uRowStria, fk) * uRay.y;
+  for (int o = 0; o < 3; o++) {
+    if (float(o) >= uRay.x) break;
+    rays += a * vnoise(vec2(x * f - t * 0.25, fk * 3.0 + t * 0.05 + float(o) * 7.3));
+    norm += a;
+    a *= 0.45;
+    f *= 2.1;
+  }
+  rays /= norm;
+  rays = mix(1.0, 0.25 + 1.1 * rays * rays, clamp(uRay.z + uRay.w * uTreble, 0.0, 1.0));
   float col = mix(pick(uRowHue, fk), hue / max(w, 1e-4), w / (w + 0.12));
   float z = base + meander + folds + arc - pick(uRowBend, fk) * min(w, 1.5);
   float height = pick(uRowHeight, fk) + lift;

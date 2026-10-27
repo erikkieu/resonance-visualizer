@@ -19,6 +19,9 @@ uniform float uCover;     // 0..1 share of each curtain's length that is lit
 uniform float uFold;      // ripple / fold amplitude
 uniform float uBright;    // overall curtain brightness
 uniform float uWarm;      // 0..1 the green body warms toward gold, the crown toward pink-white
+// the night progression over the piece (PROFILE.NIGHT)
+uniform float uNight;     // 0 = late twilight .. 1 = deepest night
+uniform float uDawn;      // 0..1 the pre-dawn glow
 
 const float HORIZON = 0.36;
 const float FOCAL = 1.1;

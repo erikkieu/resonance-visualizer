@@ -58,6 +58,7 @@ export class SceneManager {
         uPrevGrade: { value: new THREE.Vector2(1, 0) },
         uTime: { value: 0 },
         uResolution: { value: new THREE.Vector2(1, 1) },
+        uDither: { value: new THREE.Vector2(1, 1) },
       },
     });
   }
@@ -212,6 +213,7 @@ export class SceneManager {
     u.uHasPrev.value = prev ? 1 : 0;
     u.tPrev.value = prev ? prev.target.texture : cur.target.texture;
     if (prev) u.uPrevGrade.value.set(prev.scene.exposure, prev.scene.toneMapped ? 1 : 0);
+    u.uDither.value.set(cur.scene.dither ?? 1, cur.scene.ditherAnimated === false ? 0 : 1);
     u.uMix.value = this.fade;
     u.uTime.value = this.time;
     this.pass.render(r, this.composite, null);

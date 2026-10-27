@@ -10,6 +10,7 @@ uniform vec2 uCurGrade;     // x = exposure, y = tone map flag
 uniform vec2 uPrevGrade;
 uniform float uTime;
 uniform vec2 uResolution;
+uniform vec2 uDither;       // x = amplitude (1/255 steps), y = 1: re-seeded every frame, 0: a fixed pattern
 varying vec2 vUv;
 
 // ACES filmic fit (Stephen Hill), the same curve three.js uses.
@@ -54,8 +55,8 @@ void main() {
   }
 
   col = linearToSRGB(col);
-  // Triangular-ish dither, 1/255 amplitude
-  float d = hash12(gl_FragCoord.xy + fract(uTime) * 91.7) + hash12(gl_FragCoord.yx * 1.3 + 17.0) - 1.0;
-  col += d / 255.0;
+  // triangular-PDF dither (the sum of two uniform noises - 1), uDither.x/255 amplitude
+  float d = hash12(gl_FragCoord.xy + fract(uTime) * 91.7 * uDither.y) + hash12(gl_FragCoord.yx * 1.3 + 17.0) - 1.0;
+  col += d * uDither.x / 255.0;
   gl_FragColor = vec4(col, 1.0);
 }

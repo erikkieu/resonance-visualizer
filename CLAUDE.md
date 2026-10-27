@@ -18,7 +18,8 @@ npm run dev                         # http://localhost:5173 (?debug exposes wind
 npm run analyze [-- <id>]           # offline analysis -> public/analysis/<id>.json + printed summary (needs ffmpeg)
 npm run verify -- <id> [--quick] [--seq start,end] [--out dir]   # headless Chrome screenshots + checks
 npm run verify -- drottningholm --journey [--out dir]            # Scene 1 journey: numbers at 10 times, 5 screenshots, trend checks
-npm run verify -- standchen --aurora [--out dir]                 # Scene 2 wave aurora: packets/activity at 8 times, note/travel checks, 4 shots + 5-frame sequence
+npm run verify -- standchen --aurora [--out dir]                 # Scene 2 wave aurora: packets/activity at 8 times, note/travel checks, night/dawn, 6 shots + 5-frame sequence
+npm run verify -- standchen --smooth [--windows 10,255,287] [--out dir]  # Scene 2 aurora noise: previous vs clean look (flicker, temporal noise, grain), 3 shots
 npm run build                       # GitHub Pages build (base /resonance-visualizer/)
 ```
 
@@ -109,6 +110,28 @@ The user's brief says "Scene 2 (Starry Night, Ständchen)"; they want it on **ke
 - Controls: **A** whole aurora, **L** low layer, **M** melody layer (0.25 s fades). D overlay: packets per layer (`n/POOL`), melody height + hue + swatch + notes/s + spawned/heard, low note + swatch, and a 6 s scrolling strip of both voices' notes (violet = melody, green = low; right of the line = announced, not yet sounding). T panel group "wave aurora".
 - Tune: too busy → raise `MIN_GAP`/`MIN_STRENGTH` (per layer) or lower `POOL`; too bright at the climax → `SCALE.BRIGHT[1]`, layer `BRIGHT`, `CAP`; waves too fast/slow → layer `SPEED` or `SCALE.SPEED`; detection itself → `src/voices.js` then `npm run analyze -- standchen`.
 - Verify: `npm run verify -- standchen --aurora [--out dir]`: 8 times (packets, melody height, low note, 1 s mean activity = Σ strength × envelope × size × brightness, lum, fps; close samples **play through** with `playTo`, since a seek clears packets and restarts the climax envelope), the 1:04–1:24 span (packets vs notes), a 1.2 s per-frame travel check, 4 shots (2:40, 4:20, 4:50, 5:50) + `aurora-seq-0..4.png` (1:15–1:16). Measured 2026-10-27: activity 2.3 (0:10) · 7.3 (1:20) · 4.9 (2:40) · 3.1 (3:25) · 8.1 (4:20) · **10.3 (4:50)** · 8.0 (5:11, amp 46 %) · 1.5 (5:50); lum 0.004 … 0.119 (4:50) … 0.003; span: melody 49 packets / 54 notes, low 26 / 53, speeds 0.153 vs 0.067 screens/s; 1240 packet steps, 0 backwards; 60 fps; 0 errors. Known: at the climax the waves cover most of the sky (mountains and stars stay readable); 5:50 is very faint.
+
+### Scene 2 night progression (2026-10-27, user brief)
+
+Over the Ständchen the night moves from late dusk through the deepest night (the 4:50 climax) toward the first light of dawn. (The brief arrived cut off after the 6:05 keyframe; the missing end was assumed to be: the aurora gives way to the dawn, plus the usual config / debug / verify / CLAUDE.md steps.) Everything is in `profiles/standchen.js` → `NIGHT`:
+- `KEYS` `[time s, night, dawn]`, monotone cubic (Fritsch–Carlson, `monotone()` in `Scene2Aurora.js`) at `perf.t`: 0:00 0.15/0 · 1:30 0.40/0 · 3:00 0.75/0 · 4:50 1.0/0 · 5:20 0.85/0.1 · 6:05 0.35/0.7. Smoothed `SMOOTHING` 1.5 s (seeks jump). With no score (mic, unknown file, demo) it ping-pongs through the same timeline over `LOOP` 360 s.
+- `landscape.frag` (`uNight`/`uDawn` in `common.glsl`): sky gradient `SKY.DUSK` → `SKY.NIGHT` [horizon, zenith]; `horizonGlow()` = a dusk band in the west (left, `DUSK_GLOW`: warm → teal by `COOL_AT`, sinking, gone by night `FADE`) and a dawn band in the east (right, `DAWN_GLOW`: rose at the horizon → pale blue above, × dawn); it also lights the snow (`SNOW`) and is mirrored in the water. `STARS.SHOWN` = share of the field shown, brightest first (the faint layer only in the second half), `GAIN` brightness; at dawn the stars thin from the horizon upward (`DAWN_REACH`) and dim. `MILKY_WAY` only above night 0.55 (a hint, strongest at 1). `AURORA.GAIN`/`SATURATION`: pale and faint at dusk, vivid at night; `DAWN_FADE` × dawn dims it. `WATER` base colour darkens with night.
+- D overlay row "night" (horizon swatch, night, dawn, timeline / loop). T panel group "night". `auroraState` has `night`, `dawn`, `nightSource`.
+- Verify (`--aurora`): night/dawn per time, shots now also at 0:10 and 1:20; checks the night deepens up to 4:50, is deepest there, dawn only after it. Measured 2026-10-27: night 0.18 · 0.37 · 0.68 · 0.83 · 0.97 · **1.00** · 0.92 · 0.53 (dawn 0.48 at 5:50); the wave aurora checks unchanged; 60 fps, 0 errors.
+
+### Scene 2 aurora noise reduction (2026-10-27, user brief)
+
+The aurora must read as smooth, silky light: no grain, speckle, boiling or flicker. Config: `profiles/standchen.js` → `AURORA.NOISE`; **N** toggles the previous look (`scene.clean`) for comparison. Sources found and what was done:
+- **Slice jitter** (`aurora.frag`): white noise re-seeded every frame (boiling grain) → a fixed interleaved-gradient pattern (`uNoise.y`), which the composite blur removes. **Curtain edges**: sheet thickness × `EDGE` 1.35.
+- **Rays** (`curtains.frag`, `uRay`): one octave at high contrast (0.55 + 0.25 × treble) → `OCTAVES` 2 at `FREQUENCY` 0.55 × STRIATION, `RAY_CONTRAST` 0.32, treble adds only `SHIMMER.AMP` 0.12. The pattern is advected along the curtain by the scene clock (never re-seeded).
+- **Blur** (`landscape.frag`, `uAuroraBlur`): 5 taps at 2.5 px → a 3×3 tent at `BLUR` 4.5 px (stable kernel). The aurora pass stays at its fixed 0.28–0.4 resolution, upsampled linearly.
+- **Audio values** (`_smoothAudio`): bass, mid (fold frequency: a small change moved every fold), treble, energy and surge were raw per frame → attack `SMOOTH.ATTACK` 0.25 s / release 0.9 s through a soft `DEADBAND` 0.04; treble over `SHIMMER.TIME` 1.5 s; surge rises over `SURGE_ATTACK` 0.08 s and keeps its own decay. The curtains' resting hue glides (`SMOOTH.HUE` 0.6 s) instead of jumping per note.
+- **Spawns**: at least `SPAWN.MIN_GAP` 0.1 s per layer, and a packet's strength differs from the last by at most `SPAWN.STEP` 0.3.
+- **Dither** (`composite.frag`, `scene.dither` / `ditherAnimated`, default 1 / animated for the other scenes): TPDF at `DITHER` 0.4/255, a fixed pattern. Tone mapping (ACES) stays after the HDR blend; `CAP` is the soft shoulder.
+- `GAIN` (1): × aurora brightness in the clean look (0.88 would match the previous level; the softer rays let ~10 % more light through).
+- D overlay row "smoothness": clean / previous, the audio jitter in → out (‰ per frame), blur and ray octaves. T panel: blur, ray contrast and frequency, edge, audio release.
+- Verify `--smooth`: for 5 s windows at 0:10 (quiet), 4:15 (building) and 4:47 (climax), stars hidden (`scene.hideStars`), the wave seed reset, each look measured twice A B B A and averaged. It reads back every frame of the sky above the mountains (320 px wide) and reports flicker = mean |ΔY| frame to frame, temporal noise = mean |Y(t) − (Y(t−1) + Y(t+1))/2|, grain = mean |Laplacian|, lum, chroma, p98. **Measured 2026-10-27** (clean vs previous): temporal noise −77 / −66 / −67 %; flicker −29 / −22 / −44 % (−43 / −34 / −36 % per unit of light); grain −40 / −37 / −40 %; lum 125 / 118 / 89 %; chroma 115 / 100 / 92 %; 60 fps, 0 errors. **Caveat:** flicker includes the waves' real travel, and the windows vary ±15–30 % run to run (the previous look's own numbers move that much), so flicker, grain and climax-brightness sit at the brief's 40 % / 10 % lines; temporal noise is the clean signal. In the dark quiet window the remaining grain is largely the dither itself.
+
 - **Scene 4 / Mozart:** still on the old live mappings (energy → speed, bass → flicker, treble → grain, beat → exposure flash). To do: motion locked to the score's beats, accents flicker the exposure, contrast and grain follow quick vs lyrical passages.
 
 ### Scene 1 journey (light swirls → deep blue / purple swirls)
@@ -126,7 +149,7 @@ A slow value `journey` (0 = start, 1 = end) gives the 7:14 piece a long-term arc
 
 ## Controls
 
-`1`–`5` scenes (1 Liquid Paint, 2 Aurora, 3 Starry Night, 4 Stockholm, 5 Galaxy) · `P` play the current scene's piece (or play/pause it) · `Space` play/pause · `F` fullscreen · `H` hide UI · `A` / `L` / `M` (Scene 2) aurora / low layer / melody layer on/off · `D` debug overlay + score timeline (click the timeline or a section button to seek; **Shift+0…9** jumps to 0 %…90 % of the piece) · `T` tuning sliders for the current scene/profile · drag (Scene 1) pours paint · mouse (Scenes 3, 5) parallax / pushes strokes.
+`1`–`5` scenes (1 Liquid Paint, 2 Aurora, 3 Starry Night, 4 Stockholm, 5 Galaxy) · `P` play the current scene's piece (or play/pause it) · `Space` play/pause · `F` fullscreen · `H` hide UI · `A` / `L` / `M` (Scene 2) aurora / low layer / melody layer on/off · `N` (Scene 2) clean / previous (noisy) aurora · `D` debug overlay + score timeline (click the timeline or a section button to seek; **Shift+0…9** jumps to 0 %…90 % of the piece) · `T` tuning sliders for the current scene/profile · drag (Scene 1) pours paint · mouse (Scenes 3, 5) parallax / pushes strokes.
 
 ## Status (2026-10-27)
 

@@ -19,6 +19,8 @@
  *   renderScale  fraction of the canvas resolution the output target uses
  *   toneMapped   apply ACES in the final composite
  *   exposure     linear exposure before tone mapping
+ *   dither       final dither amplitude in 1/255 steps (default 1)
+ *   ditherAnimated  re-seed the dither every frame (default true)
  */
 export class SceneBase {
   constructor({ baseSpeed = 0.5, speedGain = 1.0, speedLerp = 1.6 } = {}) {

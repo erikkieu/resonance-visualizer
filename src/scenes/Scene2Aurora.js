@@ -46,7 +46,17 @@ import curtainsFrag from '../shaders/aurora/curtains.frag?raw';
  * scales the speed, size and brightness of every wave. The light is laid
  * on as brush strokes (landscape.frag, AURORA.PAINT), and a soft per-pixel
  * cap keeps the climax from washing out the scene.
- * Keys: A fades the whole aurora out and in, L the low layer, M the melody.
+ * Over the whole piece the night moves on (PROFILE.NIGHT): `night` and
+ * `dawn` follow a keyframe timeline at the playhead, from late dusk through
+ * the deepest night at the climax toward the first light of dawn, and set the
+ * sky, horizon glow, stars, Milky Way, water and the aurora's strength.
+ * Noise reduction (AURORA.NOISE): every audio value feeding the aurora is
+ * smoothed through a soft dead-band, the slice jitter is a fixed pattern,
+ * the rays are long, low-contrast and advected along the curtains, the
+ * aurora layer gets a stable tent blur and the final dither is fixed and
+ * under 1/255. N toggles the previous look for comparison.
+ * Keys: A fades the whole aurora out and in, L the low layer, M the melody,
+ * N clean / previous look.
  */
 
 const AU = PROFILE.AURORA;
@@ -64,6 +74,42 @@ const rampStops = (ramp) => {
 const LAYERS = ['melody', 'low']; // packet slots 0-11 and 12-23 in curtains.frag
 const SLOTS = 12;
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+const NI = PROFILE.NIGHT;
+
+/**
+ * Monotone cubic (Fritsch-Carlson) through the keyframes: smooth, and never
+ * overshooting between two keys. Returns (t) -> value, held flat outside.
+ */
+function monotone(xs, ys) {
+  const n = xs.length;
+  const d = xs.slice(1).map((x, i) => (ys[i + 1] - ys[i]) / (x - xs[i]));
+  const m = xs.map((_, i) => (i === 0 ? d[0] : i === n - 1 ? d[n - 2] : d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2));
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) {
+      m[i] = m[i + 1] = 0;
+      continue;
+    }
+    const a = m[i] / d[i];
+    const b = m[i + 1] / d[i];
+    const s = a * a + b * b;
+    if (s > 9) {
+      m[i] = (3 * a * d[i]) / Math.sqrt(s);
+      m[i + 1] = (3 * b * d[i]) / Math.sqrt(s);
+    }
+  }
+  return (t) => {
+    if (t <= xs[0]) return ys[0];
+    if (t >= xs[n - 1]) return ys[n - 1];
+    let i = 0;
+    while (t > xs[i + 1]) i++;
+    const h = xs[i + 1] - xs[i];
+    const u = (t - xs[i]) / h;
+    const u2 = u * u;
+    const u3 = u2 * u;
+    return (2 * u3 - 3 * u2 + 1) * ys[i] + (u3 - 2 * u2 + u) * h * m[i] + (-2 * u3 + 3 * u2) * ys[i + 1] + (u3 - u2) * h * m[i + 1];
+  };
+}
 
 const SHAPE_KEYS = ['height', 'width', 'cover', 'bright', 'fold'];
 const lerp = (a, b, x) => a + (b - a) * x;
@@ -92,6 +138,10 @@ export default class Scene2Aurora extends SceneBase {
     this.speed = 0.5;
     this.shape = { height: 1, width: 1, cover: 0.5, bright: 1, fold: 1, warm: 0 };
     this.jumpId = -1;
+    // the night progression (PROFILE.NIGHT)
+    this.night = NI.KEYS[0][1];
+    this.dawn = NI.KEYS[0][2];
+    this.nightSource = 'loop';
     // the two-layer wave aurora (PROFILE.AURORA)
     this.amp = 0;
     this.keyBias = 0;
@@ -100,6 +150,13 @@ export default class Scene2Aurora extends SceneBase {
     this.seed = 0x2f6e2b1;
     const layer = () => ({ packets: [], pending: [], lastSpawn: -1e9, spawned: 0, heard: 0, hue: 0.4, rot: 0, rotTarget: 0, on: 1, onTarget: 1 });
     this.layers = { low: layer(), melody: layer() };
+    // noise reduction (AURORA.NOISE; N toggles the previous look)
+    this.clean = AU.NOISE.CLEAN;
+    this.smooth = { bass: 0, mid: 0, treble: 0, energy: 0, surge: 0 };
+    this.rowHue = { melody: 0.4, low: 0.4 };
+    this.jitterIn = 0; // mean per-frame change of the raw audio values (debug)
+    this.jitterOut = 0; // ... of what the aurora gets
+    this.hideStars = false; // verify: measure the aurora alone
     this.on = 1; // A toggles the aurora, L and M one layer each
     this.onTarget = 1;
     this._onKey = (e) => {
@@ -107,6 +164,7 @@ export default class Scene2Aurora extends SceneBase {
       if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
       const k = e.key.toLowerCase();
       if (k === 'a') this.onTarget = this.onTarget > 0 ? 0 : 1;
+      if (k === 'n') this.clean = !this.clean;
       const l = k === 'l' ? this.layers.low : k === 'm' ? this.layers.melody : null;
       if (l) l.onTarget = l.onTarget > 0 ? 0 : 1;
     };
@@ -133,6 +191,9 @@ export default class Scene2Aurora extends SceneBase {
       uWarm: { value: 0 },
       // the wave aurora
       uTopScale: { value: 1.6 },
+      // the night progression
+      uNight: { value: 0.15 },
+      uDawn: { value: 0 },
     };
     // the tallest a curtain can get: base height + a full packet's lift (+ the melody's pitch height)
     const tall = (L) => (L.HEIGHT + 1.2 * (L.LIFT + (L.HEIGHT_PITCH ?? 0)) * AU.SCALE.SIZE[1]) * AU.SCALE.HEIGHT[1];
@@ -156,11 +217,12 @@ export default class Scene2Aurora extends SceneBase {
         uScreen: { value: 0 },
         uCap: { value: AU.CAP },
         uOn: { value: 1 },
+        uNoise: { value: new THREE.Vector2(1, 1) },
       },
     });
     this.landMat = passMaterial({
       fragmentShader: prefix + landscapeFrag,
-      uniforms: { ...this.shared, tAurora: { value: null }, tTerrain: { value: null }, tAmbient: { value: null }, uPaint: { value: new THREE.Vector4() }, uPaint2: { value: new THREE.Vector4() } },
+      uniforms: { ...this.shared, tAurora: { value: null }, tTerrain: { value: null }, tAmbient: { value: null }, uPaint: { value: new THREE.Vector4() }, uPaint2: { value: new THREE.Vector4() }, uAuroraBlur: { value: new THREE.Vector2(2.5, 0) }, ...this._nightUniforms() },
     });
     this.terrainMat = passMaterial({ fragmentShader: prefix + terrainFrag, uniforms: { ...this.shared } });
     this.ambientMat = passMaterial({ fragmentShader: ambientFrag, uniforms: { tAurora: { value: null } } });
@@ -178,6 +240,7 @@ export default class Scene2Aurora extends SceneBase {
         uRowCurve: { value: new THREE.Vector4() },
         uRowStria: { value: new THREE.Vector4() },
         uGlow: { value: 0 },
+        uRay: { value: new THREE.Vector4(1, 1, 0.55, 0.25) },
       },
     });
     this.curtainTarget = createTarget(4096, 4);
@@ -286,23 +349,163 @@ export default class Scene2Aurora extends SceneBase {
     this.shimmer *= Math.exp(-dt / decay);
 
     this.realTime += dt;
+    this._updateNight(dt, perf, jumped);
     this._updateWaves(dt, perf, presence, jumped);
     this.on = follow(this.on, this.onTarget, 0.25);
-    this._writeAurora(wave(W.HEIGHT));
+    this._writeAurora(wave(W.HEIGHT), dt, jumped);
+    this._writeNoise();
 
     const s = this.shared;
+    const sm = this._smoothAudio(dt, audio, jumped);
     s.uTime.value = this.time;
-    s.uBass.value = audio.bass;
-    s.uMid.value = audio.mid;
-    s.uTreble.value = Math.min(1, audio.treble + this.shimmer);
-    s.uEnergy.value = audio.energy;
-    s.uSurge.value = this.surge;
+    s.uBass.value = sm.bass;
+    s.uMid.value = sm.mid;
+    s.uTreble.value = sm.treble;
+    s.uEnergy.value = sm.energy;
+    s.uSurge.value = sm.surge;
     s.uHeight.value = this.shape.height;
     s.uWidth.value = this.shape.width;
     s.uCover.value = this.shape.cover;
     s.uFold.value = this.shape.fold;
     s.uBright.value = this.shape.bright;
     s.uWarm.value = this.shape.warm;
+  }
+
+  // ------------------------------------------------------------ noise reduction
+
+  /**
+   * The audio values the aurora shaders read. Clean: each follows its raw
+   * value with ATTACK / RELEASE through a soft dead-band (changes under
+   * DEADBAND are ignored, larger ones count only beyond it), treble slower
+   * still (SHIMMER.TIME). Previous look: the raw values.
+   */
+  _smoothAudio(dt, audio, jumped) {
+    const raw = { bass: audio.bass, mid: audio.mid, treble: Math.min(1, audio.treble + this.shimmer), energy: audio.energy, surge: this.surge };
+    const N = AU.NOISE;
+    const out = this.smooth;
+    let dIn = 0;
+    let dOut = 0;
+    for (const k of Object.keys(raw)) {
+      const prev = out[k];
+      if (!this.clean || jumped) out[k] = raw[k];
+      else {
+        const d = raw[k] - prev;
+        const ex = Math.sign(d) * Math.max(0, Math.abs(d) - N.SMOOTH.DEADBAND);
+        const tau = k === 'treble' ? N.SHIMMER.TIME : k === 'surge' ? (d > 0 ? N.SMOOTH.SURGE_ATTACK : dt) : d > 0 ? N.SMOOTH.ATTACK : N.SMOOTH.RELEASE;
+        out[k] = k === 'surge' && d < 0 ? raw[k] : prev + ex * (1 - Math.exp(-dt / tau));
+      }
+      dIn += Math.abs(raw[k] - (this.lastRaw?.[k] ?? raw[k]));
+      dOut += Math.abs(out[k] - prev);
+    }
+    this.lastRaw = raw;
+    // (debug: mean change per frame, smoothed over ~1 s)
+    const k = 1 - Math.exp(-dt / 1);
+    this.jitterIn += (dIn / 5 - this.jitterIn) * k;
+    this.jitterOut += (dOut / 5 - this.jitterOut) * k;
+    return out;
+  }
+
+  /** Noise uniforms: the clean look (AURORA.NOISE) or the previous one. */
+  _writeNoise() {
+    const N = AU.NOISE;
+    const c = this.clean;
+    this.curtainMat.uniforms.uRay.value.set(c ? N.OCTAVES : 1, c ? N.FREQUENCY : 1, c ? N.RAY_CONTRAST : 0.55, c ? N.SHIMMER.AMP : 0.25);
+    this.auroraMat.uniforms.uNoise.value.set(c ? N.EDGE : 1, c ? 1 : 0);
+    this.landMat.uniforms.uAuroraBlur.value.set(c ? N.BLUR : 2.5, c ? 1 : 0);
+    this.dither = c ? N.DITHER : 1;
+    this.ditherAnimated = !c;
+  }
+
+  // ------------------------------------------------------------ the night progression
+
+  _nightUniforms() {
+    const v3 = (c) => ({ value: new THREE.Vector3(...c) });
+    return {
+      uSkyDusk: { value: [new THREE.Vector3(), new THREE.Vector3()] },
+      uSkyNight: { value: [new THREE.Vector3(), new THREE.Vector3()] },
+      uDuskWarm: v3(NI.DUSK_GLOW.WARM),
+      uDuskCool: v3(NI.DUSK_GLOW.COOL),
+      uDuskGlow: { value: new THREE.Vector4() },
+      uDawnLow: v3(NI.DAWN_GLOW.LOW),
+      uDawnHigh: v3(NI.DAWN_GLOW.HIGH),
+      uGlowHeight: { value: new THREE.Vector4() },
+      uStars: { value: new THREE.Vector4() },
+      uMilkyWay: { value: 0 },
+      uNightAurora: { value: new THREE.Vector4() },
+      uWater: v3(NI.WATER),
+      uSnowGlow: { value: 0 },
+    };
+  }
+
+  /**
+   * night / dawn at the playhead (monotone cubic through NIGHT.KEYS); with no
+   * score, a slow ping-pong over NIGHT.LOOP s through the same timeline.
+   */
+  _updateNight(dt, perf, jumped) {
+    const keys = NI.KEYS;
+    const sig = JSON.stringify(keys);
+    if (sig !== this.nightSig) {
+      // (rebuilt when the keys are tuned)
+      this.nightSig = sig;
+      const xs = keys.map((k) => k[0]);
+      this.nightCurve = monotone(xs, keys.map((k) => k[1]));
+      this.dawnCurve = monotone(xs, keys.map((k) => k[2]));
+    }
+    const end = keys[keys.length - 1][0];
+    let t;
+    if (perf.source === 'score') {
+      this.nightSource = 'score';
+      t = perf.t;
+    } else {
+      this.nightSource = 'loop';
+      const ph = (this.realTime / NI.LOOP) % 1;
+      t = end * (1 - Math.abs(2 * ph - 1)); // there and back, so the cycle never jumps
+    }
+    const night = clamp01(this.nightCurve(t));
+    const dawn = clamp01(this.dawnCurve(t));
+    const k = jumped ? 1 : 1 - Math.exp(-dt / NI.SMOOTHING);
+    this.night += (night - this.night) * k;
+    this.dawn += (dawn - this.dawn) * k;
+    this.shared.uNight.value = this.night;
+    this.shared.uDawn.value = this.dawn;
+
+    const u = this.landMat.uniforms;
+    u.uSkyDusk.value[0].set(...NI.SKY.DUSK[0]);
+    u.uSkyDusk.value[1].set(...NI.SKY.DUSK[1]);
+    u.uSkyNight.value[0].set(...NI.SKY.NIGHT[0]);
+    u.uSkyNight.value[1].set(...NI.SKY.NIGHT[1]);
+    const G = NI.DUSK_GLOW;
+    u.uDuskWarm.value.set(...G.WARM);
+    u.uDuskCool.value.set(...G.COOL);
+    u.uDuskGlow.value.set(G.COOL_AT[0], G.COOL_AT[1], G.FADE, G.STRENGTH);
+    const D = NI.DAWN_GLOW;
+    u.uDawnLow.value.set(...D.LOW);
+    u.uDawnHigh.value.set(...D.HIGH);
+    u.uGlowHeight.value.set(G.HEIGHT, D.HEIGHT, D.STRENGTH, 0);
+    const S = NI.STARS;
+    u.uStars.value.set(this.hideStars ? 0 : lerp(S.GAIN[0], S.GAIN[1], this.night), lerp(S.SHOWN[0], S.SHOWN[1], this.night), S.DAWN_REACH, 0);
+    const mw = this.night <= 0.55 ? 0 : ((this.night - 0.55) / 0.45) ** 2;
+    u.uMilkyWay.value = lerp(NI.MILKY_WAY[0], NI.MILKY_WAY[1], mw);
+    const A = NI.AURORA;
+    u.uNightAurora.value.set(lerp(A.GAIN[0], A.GAIN[1], this.night) * (1 - A.DAWN_FADE * this.dawn), lerp(A.SATURATION[0], A.SATURATION[1], this.night), 0, 0);
+    u.uWater.value.set(...NI.WATER);
+    u.uSnowGlow.value = NI.SNOW;
+  }
+
+  /** Horizon colour now (sRGB hex), for the debug swatch. */
+  _horizonHex() {
+    const G = NI.DUSK_GLOW;
+    const D = NI.DAWN_GLOW;
+    const n = this.night;
+    const s = (a, b, x) => {
+      const f = clamp01((x - a) / (b - a));
+      return f * f * (3 - 2 * f);
+    };
+    const cool = s(G.COOL_AT[0], G.COOL_AT[1], n);
+    const glow = (1 - s(0, G.FADE, n)) * G.STRENGTH;
+    const c = [0, 1, 2].map((i) => lerp(NI.SKY.DUSK[0][i], NI.SKY.NIGHT[0][i], n) + lerp(G.WARM[i], G.COOL[i], cool) * glow + D.LOW[i] * this.dawn * D.STRENGTH);
+    const col = new THREE.Color(c[0], c[1], c[2]); // linear -> displayed as sRGB
+    return '#' + col.multiplyScalar(4).getHexString();
   }
 
   // ------------------------------------------------------------ the wave aurora
@@ -380,13 +583,18 @@ export default class Scene2Aurora extends SceneBase {
   }
 
   _spawn(name, L, layer, e) {
-    if (e.strength < L.MIN_STRENGTH || this.realTime - layer.lastSpawn < L.MIN_GAP) return;
+    const NS = AU.NOISE.SPAWN;
+    const minGap = this.clean ? Math.max(L.MIN_GAP, NS.MIN_GAP) : L.MIN_GAP;
+    if (e.strength < L.MIN_STRENGTH || this.realTime - layer.lastSpawn < minGap) return;
     layer.lastSpawn = this.realTime;
     layer.spawned++;
     const h = clamp01(e.height);
     const S = AU.SCALE;
     const size = lerp(S.SIZE[0], S.SIZE[1], this.amp);
-    const strength = lerp(0.5, 1, clamp01(e.strength));
+    let strength = lerp(0.5, 1, clamp01(e.strength));
+    // clean: a packet differs from the last one by at most STEP, so fast notes form a stream, not a strobe
+    if (this.clean && layer.lastStrength !== undefined) strength = Math.min(layer.lastStrength + NS.STEP, Math.max(layer.lastStrength - NS.STEP, strength));
+    layer.lastStrength = strength;
     const hue = clamp01(lerp(L.HUE_RANGE[0], L.HUE_RANGE[1], h) + this.keyBias);
     const p = {
       id: this.nextId++,
@@ -414,11 +622,11 @@ export default class Scene2Aurora extends SceneBase {
   }
 
   /** Hands the aurora state to the curtain, aurora and landscape passes. */
-  _writeAurora(height) {
+  _writeAurora(height, dt = 0, jumped = true) {
     const cu = this.curtainMat.uniforms;
     const au = this.auroraMat.uniforms;
     const S = AU.SCALE;
-    const bright = lerp(S.BRIGHT[0], S.BRIGHT[1], this.amp);
+    const bright = lerp(S.BRIGHT[0], S.BRIGHT[1], this.amp) * (this.clean ? AU.NOISE.GAIN : 1);
     LAYERS.forEach((name, li) => {
       const L = AU[name.toUpperCase()];
       const layer = this.layers[name];
@@ -439,12 +647,16 @@ export default class Scene2Aurora extends SceneBase {
     const mel = this.layers.melody;
     const low = this.layers.low;
     cu.uRowHeight.value.set(M.HEIGHT * height, M.HEIGHT * height, L.HEIGHT * height, L.HEIGHT * height);
-    cu.uRowHue.value.set(mel.hue, mel.hue, low.hue, low.hue);
+    // the curtains' resting colour: clean, it glides to each new note's hue instead of jumping
+    const kh = this.clean && !jumped ? 1 - Math.exp(-dt / AU.NOISE.SMOOTH.HUE) : 1;
+    this.rowHue.melody += (mel.hue - this.rowHue.melody) * kh;
+    this.rowHue.low += (low.hue - this.rowHue.low) * kh;
+    cu.uRowHue.value.set(this.rowHue.melody, this.rowHue.melody, this.rowHue.low, this.rowHue.low);
     cu.uRowBright.value.set(M.BRIGHT * bright, M.BRIGHT * bright, L.BRIGHT * bright, L.BRIGHT * bright);
     cu.uRowBend.value.set(M.BEND, M.BEND, L.BEND, L.BEND);
     cu.uRowCurve.value.set(M.CURVE, M.CURVE, L.CURVE, L.CURVE);
     cu.uRowStria.value.set(M.STRIATION, M.STRIATION * 0.85, L.STRIATION, L.STRIATION * 0.85);
-    cu.uGlow.value = AU.GLOW * this.amp;
+    cu.uGlow.value = AU.GLOW * this.amp * (this.clean ? AU.NOISE.GAIN : 1);
     au.uRowSheet.value.set(M.SHEET, M.SHEET, L.SHEET, L.SHEET);
     au.uHueRot.value.set(mel.rot, mel.rot, low.rot, low.rot);
     au.uCrest.value = AU.CREST;
@@ -485,7 +697,7 @@ export default class Scene2Aurora extends SceneBase {
       };
     };
     const v = this.perfVoices;
-    return { amp: this.amp, on: this.onTarget > 0, low: layer('low'), melody: layer('melody'), melodyHeight: v?.melody.height ?? 0, lowNote: v?.low.note ?? -1 };
+    return { clean: this.clean, night: this.night, dawn: this.dawn, nightSource: this.nightSource, amp: this.amp, on: this.onTarget > 0, low: layer('low'), melody: layer('melody'), melodyHeight: v?.melody.height ?? 0, lowNote: v?.low.note ?? -1 };
   }
 
   /** A small scrolling strip of the two voices' recent notes (debug overlay). */
@@ -520,6 +732,8 @@ export default class Scene2Aurora extends SceneBase {
       melody: { html: `${sw(this._rampHex(AU.MELODY.RAMP, mel.hue, mel.rot))} height ${(v?.melody.height ?? 0).toFixed(2)} · hue ${mel.hue.toFixed(2)} · ${(v?.melody.rate ?? 0).toFixed(1)} notes/s · spawned ${mel.spawned}/${mel.heard}` },
       'low note': { html: `${sw(this._rampHex(AU.LOW.RAMP, low.hue, low.rot))} ${v && v.low.note >= 0 ? names[v.low.note] : '-'} · height ${(v?.low.height ?? 0).toFixed(2)} · ${(v?.low.rate ?? 0).toFixed(1)} notes/s · spawned ${low.spawned}/${low.heard}` },
       voices: perf ? { html: this._voiceStrip(perf) + ' <span style="color:#b98cff">melody</span> / <span style="color:#2fd39a">low</span>' } : '-',
+      smoothness: `${this.clean ? 'clean' : 'PREVIOUS look'} (N) · audio jitter ${(this.jitterIn * 1000).toFixed(1)} -> ${(this.jitterOut * 1000).toFixed(1)} ‰/frame (${this.jitterIn > 0 ? Math.round((1 - this.jitterOut / this.jitterIn) * 100) : 0} % less) · blur ${this.landMat.uniforms.uAuroraBlur.value.x} px · rays ${this.curtainMat.uniforms.uRay.value.x} oct`,
+      night: { html: `${sw(this._horizonHex())} night ${this.night.toFixed(2)} · dawn ${this.dawn.toFixed(2)} · ${this.nightSource === 'score' ? 'timeline' : `loop ${NI.LOOP} s`}` },
       'speed ×': this.speed.toFixed(2),
       build: `${this.build.toFixed(2)} · climax ${this.climax.toFixed(2)} · exposure ${this.exposure.toFixed(2)}`,
       curtains: `height ${sh.height.toFixed(2)} · width ${sh.width.toFixed(2)} · fold ${sh.fold.toFixed(2)}`,

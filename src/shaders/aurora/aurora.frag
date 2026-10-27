@@ -34,6 +34,7 @@ uniform float uScreen;            // 0 = the layers add, 1 = screen blend
 uniform float uTopScale;          // tallest possible curtain (relative height)
 uniform float uCap;
 uniform float uOn;                // 0..1, the A key fades the aurora out
+uniform vec2 uNoise;              // x = curtain edge softness, y = 1: slice jitter fixed in screen space (0: re-seeded every frame)
 varying vec2 vUv;
 
 const int CURTAINS = 4;
@@ -74,8 +75,12 @@ void main() {
   // the slices cover the tallest curtain; bass swells the curtains gently
   float topAlt = 2.3 * (1.0 + 0.3 * uBass) * uHeight * uTopScale;
   float N = uSteps;
-  // per-pixel jitter of the slice offsets hides banding between slices
-  float jitter = hash12(gl_FragCoord.xy + fract(t * 7.0) * 13.0);
+  // per-pixel jitter of the slice offsets hides banding between slices: a fixed
+  // interleaved-gradient pattern (blue-noise-like, vanishes under the composite's blur),
+  // or (the previous look) white noise re-seeded every frame, which boils
+  float jitter = uNoise.y > 0.5
+    ? fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))
+    : hash12(gl_FragCoord.xy + fract(t * 7.0) * 13.0);
   float rot[4];
   rot[0] = uHueRot.x;
   rot[1] = uHueRot.y;
@@ -104,7 +109,7 @@ void main() {
     float lu = clamp(q.x / 100.0 + 0.5, 0.0, 1.0);
     for (int k = 0; k < CURTAINS; k++) {
       bool mel = k < 2;
-      float w = (0.18 + 0.12 * f) * uWidth * sheet[k];
+      float w = (0.18 + 0.12 * f) * uWidth * sheet[k] * uNoise.x;
       float we = sqrt(w * w + 0.36 * slicePitch * slicePitch);
       vec4 c = texture2D(tCurtains, vec2(lu, (float(k) + 0.5) / 4.0));
       // height within this curtain (its own height varies along it with the music)
