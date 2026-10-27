@@ -28,11 +28,22 @@
  *             noteId misses; melodyNote is its decaying pulse
  *   chroma / dominantNote / dominantNoteName / noteStrength
  *             12-bin pitch-class profile (C..B) and its strongest class
+ *   the two voices (src/voices.js; scoreMap.js turns them into perf.voices when no
+ *   analysis is loaded):
+ *   lowNoteId / lowStrength / lowHz / lowHeight / lowConfidence / lowNote
+ *             low register (bass notes, low chord tones): flux onsets in VOICES.LOW.FLUX_HZ,
+ *             the strongest long-FFT peak in REGISTER_HZ (height 0..1 log over it) and
+ *             the dominant pitch class of the low-register chroma
+ *   leadNoteId / leadStrength / leadHz / leadHeight / leadConfidence
+ *             the melody: a pitch step of VOICES.MELODY.STEP semitones held
+ *             LIVE.MELODY_STEP_HOLD s, or a melody onset while voiced
  *
  * Sources: microphone, a local file (via an <audio> element, so seeking is
  * trivial), or the synthetic generator. When nothing live is audible, the
  * output cross-fades to a gentle "idle" signal so scenes never freeze.
  */
+
+import { VOICES } from './voices.js';
 
 // ===================================================================== config
 // Pitch height (melody) and chroma. All tuning lives here.
@@ -211,6 +222,23 @@ class AudioEngine {
     this.onsetRate = 0;
     this.melodyNote = 0;
     this.melodyNoteId = 0;
+    // the two voices
+    this.lowNoteId = 0;
+    this.lowStrength = 0;
+    this.lowHz = 0;
+    this.lowHeight = 0;
+    this.lowConfidence = 0;
+    this.lowNote = -1;
+    this.leadNoteId = 0;
+    this.leadStrength = 0;
+    this.leadHz = 0;
+    this.leadHeight = 0;
+    this.leadConfidence = 0;
+    this._lowChroma = new Float32Array(12);
+    this._leadSemi = NaN;
+    this._leadPending = NaN;
+    this._leadPendingAt = 0;
+    this._leadLast = -10;
     this._noteCount = 0; // leaky note counter for the density estimate
     /** 0 = fully synthetic, 1 = fully live input */
     this.liveMix = 0;
@@ -229,6 +257,8 @@ class AudioEngine {
     this._onsetDetector = new OnsetDetector({ k: ONSET_CONFIG.K, floor: ONSET_CONFIG.FLOOR, refractory: ONSET_CONFIG.REFRACTORY });
     this._onsetCount = 0; // leaky onset counter for the rate
     this._melodyDetector = new OnsetDetector({ k: MELODY_CONFIG.K, floor: MELODY_CONFIG.FLOOR, refractory: MELODY_CONFIG.REFRACTORY });
+    const LL = VOICES.LIVE.LOW;
+    this._lowDetector = new OnsetDetector({ k: LL.K, floor: LL.FLOOR, refractory: LL.REFRACTORY });
     // adaptive loudness: short-term mean square and a ring of recent dB values
     this._meanSquare = 0;
     this._levelRing = new Float32Array(LEVEL_CONFIG.WINDOW * HISTORY_HZ);
@@ -333,12 +363,14 @@ class AudioEngine {
     this.noteBins = [toFastBin(150), toFastBin(6000)];
     this.onsetBins = [toFastBin(ONSET_CONFIG.MIN_HZ), toFastBin(ONSET_CONFIG.MAX_HZ)];
     this.melodyBins = [toFastBin(MELODY_CONFIG.MIN_HZ), toFastBin(MELODY_CONFIG.MAX_HZ)];
+    this.lowFluxBins = [toFastBin(VOICES.LOW.FLUX_HZ[0]), Math.max(toFastBin(VOICES.LOW.FLUX_HZ[0]) + 1, toFastBin(VOICES.LOW.FLUX_HZ[1]))];
 
     // Long FFT: melody band for the pitch peak, and the chroma folding table
     const C = PITCH_CONFIG;
     const pHz = this.ctx.sampleRate / C.FFT_SIZE;
     this.pitchBinHz = pHz;
     this.pitchBins = [Math.max(2, Math.floor(C.FMIN / pHz)), Math.ceil(C.FMAX / pHz)];
+    this.lowPitchBins = VOICES.LOW.REGISTER_HZ.map((hz) => Math.max(2, Math.round(hz / pHz)));
     // tilt in dB per bin so higher (melodic) peaks win over loud low partials
     this.pitchTilt = Float32Array.from({ length: this.pitchBins[1] - this.pitchBins[0] + 1 }, (_, i) => C.PEAK_TILT_DB_PER_OCTAVE * Math.log2(((this.pitchBins[0] + i) * pHz) / C.FMIN));
     // chroma: each bin goes to its nearest semitone, weighted by how close it is
@@ -558,9 +590,17 @@ class AudioEngine {
       if (d > 0) melodyFlux += d;
     }
     melodyFlux /= (mhi - mlo) * 255;
+    let lowFlux = 0;
+    const [llo, lhi] = this.lowFluxBins;
+    for (let i = llo; i < lhi; i++) {
+      const d = ff[i] - this.prevFast[i];
+      if (d > 0) lowFlux += d;
+    }
+    lowFlux /= (lhi - llo) * 255;
     this.prevFast.set(ff);
 
     const { pitchHz, pitchConfidence, chroma } = this._analysePitch();
+    const low = this._analyseLow();
 
     // Normalize: band means come in dB space already, so a gamma > 1 restores contrast
     const n = this._norm;
@@ -570,6 +610,8 @@ class AudioEngine {
       noteFlux,
       onsetFlux,
       melodyFlux,
+      lowFlux,
+      low,
       pitchHz,
       pitchConfidence,
       chroma,
@@ -642,6 +684,69 @@ class AudioEngine {
     else chroma.fill(1 / 12);
 
     return { pitchHz, pitchConfidence, chroma };
+  }
+
+  /**
+   * The low voice from the long FFT (already read by _analysePitch): the
+   * strongest peak in VOICES.LOW.REGISTER_HZ and its prominence, plus the
+   * low-register chroma.
+   */
+  _analyseLow() {
+    const d = this.pitchData;
+    const [lo, hi] = this.lowPitchBins;
+    let best = -1;
+    let bestDb = -Infinity;
+    let sum = 0;
+    const chroma = this._lowChroma.fill(0);
+    for (let k = lo; k <= hi; k++) {
+      const db = Math.max(d[k], -140);
+      sum += db;
+      if (db > bestDb && db >= d[k - 1] && db >= d[k + 1]) [bestDb, best] = [db, k];
+      if (db > -100) {
+        const midi = 69 + 12 * Math.log2((k * this.pitchBinHz) / 440);
+        chroma[((Math.round(midi) % 12) + 12) % 12] += Math.log1p(100 * Math.pow(10, db / 20));
+      }
+    }
+    const [r0, r1] = VOICES.LOW.REGISTER_HZ;
+    const hz = best > 0 ? best * this.pitchBinHz : 0;
+    let note = -1;
+    let max = 0;
+    for (let i = 0; i < 12; i++) if (chroma[i] > max) [max, note] = [chroma[i], i];
+    return {
+      hz,
+      height: hz > 0 ? clamp01(Math.log2(hz / r0) / Math.log2(r1 / r0)) : 0,
+      confidence: best > 0 ? clamp01((bestDb - sum / (hi - lo + 1) - 6) / 12) : 0,
+      note,
+    };
+  }
+
+  /** The melody voice: a held pitch step, or a melody onset while voiced. */
+  _updateLead(live, melodyNow, dt) {
+    const V = VOICES.MELODY;
+    const hz = live.pitchHz;
+    const voiced = live.pitchConfidence >= V.MIN_CONF && hz >= V.REGISTER_HZ[0] && hz <= V.REGISTER_HZ[1];
+    this.leadHz = voiced ? hz : 0;
+    this.leadConfidence = live.pitchConfidence;
+    let fire = false;
+    if (voiced) {
+      const s = 12 * Math.log2(hz / 440);
+      if (!(Math.abs(s - this._leadSemi) < V.STEP)) {
+        if (!(Math.abs(s - this._leadPending) < 0.5)) {
+          this._leadPending = s;
+          this._leadPendingAt = this.time;
+        } else if (this.time - this._leadPendingAt >= VOICES.LIVE.MELODY_STEP_HOLD) {
+          this._leadSemi = s;
+          this._leadPending = NaN;
+          fire = true;
+        }
+      } else if (melodyNow) fire = true;
+    } else this._leadPending = NaN;
+    if (fire && this.time - this._leadLast >= V.MIN_GAP) {
+      this._leadLast = this.time;
+      this.leadNoteId++;
+      this.leadStrength = clamp01(0.3 + 0.7 * this.level);
+    }
+    this.leadHeight = this.pitchHeight;
   }
 
   /**
@@ -882,6 +987,31 @@ class AudioEngine {
     }
     this.pitchHeight = live ? liveHeight * m + this._synthHeight * (1 - m) : this._synthHeight;
     this._updateChroma(live && m > 0.5 ? live.chroma : synth.chroma, dt);
+
+    // the two voices (the synthetic signal: its beats are the low notes, its notes the melody)
+    if (live && m > 0.5) {
+      if (this._lowDetector.detect(live.lowFlux, this.time)) {
+        this.lowNoteId++;
+        this.lowStrength = clamp01(0.3 + 0.7 * this.level);
+      }
+      this.lowHz = live.low.hz;
+      this.lowHeight = follow(this.lowHeight, live.low.height, dt, 0.08, 0.4);
+      this.lowConfidence = live.low.confidence;
+      this.lowNote = live.low.note;
+      this._updateLead(live, melodyNow, dt);
+    } else {
+      if (synth.beat) {
+        this.lowNoteId++;
+        this.lowStrength = 0.4 + 0.5 * synth.level;
+      }
+      if (synth.note) {
+        this.leadNoteId++;
+        this.leadStrength = 0.4 + 0.5 * synth.level;
+      }
+      this.lowHeight = 0.3;
+      this.leadHeight = this.pitchHeight;
+      this.lowNote = this.dominantNote;
+    }
 
     for (const k of ['bass', 'mid', 'treble', 'energy']) {
       const target = live ? synth[k] * (1 - m) + live[k] * m : synth[k];

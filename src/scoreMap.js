@@ -24,6 +24,13 @@
  *   chroma, key { name, tonic, mode }, keyId (increments on a key change)
  *   beatPhase, beatId, cues (manual cues fired this frame), jumpId (increments on a seek)
  *   bass, mid, treble, presence   from the live analyser (fine detail, works with the mic)
+ *   voices        the music split in two (src/voices.js): voices.low (bass notes, low chord tones)
+ *                 and voices.melody (the singing top line), each
+ *                   { events, height, hz, conf, note, rate }
+ *                 events = this frame's notes { t, strength, height, pc, in }, announced VOICE_LEAD s
+ *                 before they sound (`in` = s until the note; 0 live), so a visual with a fade-in
+ *                 can land on the note; height/hz/conf/note follow the playhead; rate = notes / s.
+ *                 voices.history keeps the last HISTORY s of notes for the debug overlay.
  */
 import { audio as defaultAudio } from './audio.js';
 
@@ -31,6 +38,8 @@ import { audio as defaultAudio } from './audio.js';
 export const SCORE_CONFIG = {
   LOOKAHEAD: 1.5, // s the score looks ahead (crescendos, section changes)
   ONSET_WINDOW: 0.2, // s of upcoming onsets exposed for scheduling
+  VOICE_LEAD: 0.35, // s voice notes are announced ahead (>= the longest packet fade-in)
+  VOICE_HISTORY: 6, // s of voice notes kept for the debug strip
   DRIFT_SNAP: 0.25, // s: farther than this from the media clock -> jump (a seek)
   DRIFT_SLEW: 0.4, // s: smaller drift is pulled in over this time constant
   S_CURVE: 1.3, // contrast of the level S-curve (1 = linear)
@@ -119,6 +128,19 @@ export class ScoreMap {
         accent: strength >= M.ACCENT,
       };
     });
+
+    // the two voices (older analyses have none: the melody falls back to the melody-tagged onsets)
+    const v = data.voices;
+    const notes = (n) => n.times.map((t, i) => ({ t, strength: n.strength[i], height: n.height[i], pc: n.pc[i] }));
+    this.voices = v
+      ? {
+          low: { notes: notes(v.low.notes), hz: Float32Array.from(v.low.hz), height: Float32Array.from(v.low.height), conf: Float32Array.from(v.low.confidence), note: Int8Array.from(v.low.note) },
+          melody: { notes: notes(v.melody.notes), hz: Float32Array.from(v.melody.hz), height: Float32Array.from(v.melody.height), conf: Float32Array.from(v.melody.confidence), note: null },
+        }
+      : {
+          low: { notes: [], hz: null, height: null, conf: null, note: null },
+          melody: { notes: this.onsets.filter((o) => o.melody).map((o) => ({ t: o.t, strength: o.strength, height: o.height, pc: -1 })), hz: this.hz, height: this.height, conf: this.heightConf, note: null },
+        };
 
     // climax envelope: ramps from each big moment's build start, holds, decays;
     // the biggest climax reaches 1, lesser ones less (squared, so they stay clearly smaller)
@@ -263,10 +285,14 @@ export class Performance {
     this.mid = 0;
     this.treble = 0;
     this.presence = 0;
+    const voice = () => ({ events: [], height: 0, hz: 0, conf: 0, note: -1, rate: 0 });
+    this.voices = { low: voice(), melody: voice(), history: [] };
     this._sectionIndex = -1;
     this._keyStart = -1;
     this._beatIndex = -1;
     // live fallback state
+    this._lastLowId = 0;
+    this._lastLeadId = 0;
     this._lastOnsetId = 0;
     this._lastMelodyId = 0;
     this._liveSlow = 0;
@@ -294,9 +320,27 @@ export class Performance {
     this.onsets.length = 0;
     this.cues.length = 0;
     this.upcoming.length = 0;
+    this.voices.low.events.length = 0;
+    this.voices.melody.events.length = 0;
     const scored = this.map && a.mode === 'file' && a.element;
     if (scored) this._updateScore(dt);
     else this._updateLive(dt);
+    this._voiceHistory(dt);
+  }
+
+  /** Recent voice notes (debug strip) and the note rate of each voice. */
+  _voiceHistory(dt) {
+    const v = this.voices;
+    const h = v.history;
+    if (this.jumpId !== this._historyJump) {
+      this._historyJump = this.jumpId;
+      h.length = 0;
+    }
+    for (const k of ['low', 'melody']) {
+      for (const e of v[k].events) h.push({ voice: k, t: this.t + e.in, strength: e.strength, height: e.height });
+      v[k].rate += ((v[k].events.length / Math.max(dt, 1e-3)) - v[k].rate) * (1 - Math.exp(-dt / 3));
+    }
+    while (h.length && h[0].t < this.t - SCORE_CONFIG.VOICE_HISTORY) h.shift();
   }
 
   // ----------------------------------------------------------------- score
@@ -368,6 +412,21 @@ export class Performance {
       for (let i = upperBound(m.onsets, prevT, (o) => o.t); i < m.onsets.length && m.onsets[i].t <= t; i++) this.onsets.push(m.onsets[i]);
       for (let i = upperBound(m.cues, prevT, (c) => c.t); i < m.cues.length && m.cues[i].t <= t; i++) this.cues.push(m.cues[i]);
     }
+    // the two voices: notes are announced VOICE_LEAD s ahead
+    const lead = C.VOICE_LEAD;
+    for (const k of ['low', 'melody']) {
+      const src = m.voices[k];
+      const out = this.voices[k];
+      if (!jumped && playing && t > prevT) {
+        for (let i = upperBound(src.notes, prevT + lead, (o) => o.t); i < src.notes.length && src.notes[i].t <= t + lead; i++) {
+          out.events.push({ ...src.notes[i], in: Math.max(0, src.notes[i].t - t) });
+        }
+      }
+      out.height = src.height ? m.sample(src.height, t) : 0;
+      out.hz = src.hz ? m.sample(src.hz, t) : 0;
+      out.conf = src.conf ? m.sample(src.conf, t) : 0;
+      out.note = src.note ? src.note[Math.min(src.note.length - 1, Math.max(0, Math.round(t * m.chromaRate)))] : -1;
+    }
     if (playing) {
       for (let i = upperBound(m.onsets, t, (o) => o.t); i < m.onsets.length && m.onsets[i].t <= t + C.ONSET_WINDOW; i++) {
         this.upcoming.push({ ...m.onsets[i], in: m.onsets[i].t - t });
@@ -436,6 +495,19 @@ export class Performance {
       const strength = clamp01(0.3 + 0.7 * a.level);
       this.onsets.push({ t: this.t, strength, height: a.pitchHeight, melody, accent: strength > 0.8 });
     }
+    // the two voices from the live analyser (no look-ahead: in = 0)
+    const lo = this.voices.low;
+    const me = this.voices.melody;
+    if (a.lowNoteId !== this._lastLowId) {
+      this._lastLowId = a.lowNoteId;
+      lo.events.push({ t: this.t, strength: a.lowStrength, height: a.lowHeight, pc: a.lowNote, in: 0 });
+    }
+    if (a.leadNoteId !== this._lastLeadId) {
+      this._lastLeadId = a.leadNoteId;
+      me.events.push({ t: this.t, strength: a.leadStrength, height: a.leadHeight, pc: a.leadHz > 0 ? (((Math.round(12 * Math.log2(a.leadHz / 440)) + 9) % 12) + 12) % 12 : -1, in: 0 });
+    }
+    Object.assign(lo, { height: a.lowHeight, hz: a.lowHz, conf: a.lowConfidence, note: a.lowNote });
+    Object.assign(me, { height: a.leadHeight, hz: a.leadHz, conf: a.leadConfidence, note: -1 });
   }
 
   /** Readable state for the debug overlay. */

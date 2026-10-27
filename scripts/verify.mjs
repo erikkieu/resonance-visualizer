@@ -29,11 +29,13 @@
  *
  *   npm run verify -- standchen --aurora [--out dir]
  *
- * checks Scene 2's audio-wave aurora: amplitude, ribbon hues, live pulses,
- * mean luminance and fps at AURORA_TIMES, a hue trace over a 20 s melodic
- * span, screenshots only at AURORA_SHOTS, and checks that it is faint when
- * quiet, grows into the build, peaks at the 4:50 climax, is clearly smaller
- * at 5:11, and that the hue moves with the melody.
+ * checks Scene 2's two-layer wave aurora: at AURORA_TIMES the active packets
+ * per layer, the melody pitch height, the low note, wave activity (mean over
+ * 1 s), mean luminance and fps; screenshots only at AURORA_SHOTS, plus a
+ * 5-frame sequence over 1 s at AURORA_SEQ. Checks that (a) over a melodic
+ * span the melody layer spawns about one packet per melody note and the low
+ * layer far fewer, slower ones, (b) packets travel monotonically frame to
+ * frame, (c) activity is low when quiet, peaks at 4:50 and is lower at 5:11.
  */
 import { chromium } from 'playwright';
 import { createServer } from 'vite';
@@ -56,9 +58,10 @@ const JOURNEY_SHOTS = [10, 137, 270, 347, 425];
 const JOURNEY_CLIMAXES = [137, 347]; // should stand out against their neighbours
 const AURORA = args.includes('--aurora');
 const AURORA_TIMES = [10, 80, 160, 205, 260, 290, 311, 350]; // 0:10 1:20 2:40 3:25 4:20 4:50 5:11 5:50
-const AURORA_SHOTS = [10, 160, 290, 350];
+const AURORA_SHOTS = [160, 260, 290, 350];
+const AURORA_SEQ = 75; // s: 5 frames over 1 s of the 1:04 swell's melody
 const AURORA_QUIET = [10, 205, 350]; // intro, the 3:20-3:35 release, the fade
-const AURORA_TRACE = [64, 84]; // s: 20 s of the 1:04 swell's melody, hue sampled every second
+const AURORA_TRACE = [64, 84]; // s: 20 s of the 1:04 swell's melody: packets spawned against notes heard
 const only = args.filter((a, i) => !a.startsWith('--') && !['--out', '--seq'].includes(args[i - 1]));
 const SEQ = flag('--seq', '')
   .split(',')
@@ -161,7 +164,7 @@ async function verifyPiece(browser, url, piece) {
     });
 
   if (AURORA) {
-    const result = await auroraPass(page, dir, seekAndPlay, state);
+    const result = await auroraPass(page, dir, seekAndPlay, state, analysis);
     const fps = await page.evaluate(() => window.__resonance.fps);
     fs.writeFileSync(path.join(dir, 'aurora-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
     console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
@@ -344,52 +347,122 @@ async function journeyPass(page, dir, seekAndPlay, state) {
   return { rows, checks, slope };
 }
 
-/** Scene 2's audio-wave aurora: numbers at AURORA_TIMES, a hue trace, screenshots at AURORA_SHOTS, checks. */
-async function auroraPass(page, dir, seekAndPlay, state) {
+/** Scene 2's two-layer wave aurora: numbers at AURORA_TIMES, a melodic span, a travel check, screenshots, checks. */
+async function auroraPass(page, dir, seekAndPlay, state, analysis) {
   const aurora = () => page.evaluate(() => window.__resonance.manager.current?.scene?.auroraState);
+  // per-frame samples over `ms` in the page (rAF), so timing is the real frame timing
+  const sampleFrames = (ms) =>
+    page.evaluate(
+      (ms) =>
+        new Promise((done) => {
+          const out = [];
+          const t0 = performance.now();
+          const tick = () => {
+            const a = window.__resonance.manager.current.scene.auroraState;
+            out.push({ t: window.__resonance.perf.t, low: a.low, melody: a.melody, amp: a.amp });
+            if (performance.now() - t0 < ms) requestAnimationFrame(tick);
+            else done(out);
+          };
+          requestAnimationFrame(tick);
+        }),
+      ms,
+    );
+  // play on (no seek) until the playhead reaches t: seeks clear the packets and restart the climax envelope
+  const playTo = (t) => page.waitForFunction((t) => window.__resonance.perf.t >= t, t, { timeout: 120000, polling: 50 });
+  const names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
   const rows = [];
-  console.log('    time   amp    ribbon hues         pulses  lum    hue          fps');
+  console.log('    time   amp   packets low/mel  melody h  low note  activity  lum    fps');
   let prev = -Infinity;
   for (const t of AURORA_TIMES) {
     // close samples play straight through: a seek restarts the climax envelope, so 5:11 must follow 4:50
-    await seekAndPlay(t, t - prev < 30 ? 0 : undefined);
+    if (t - prev < 30) await playTo(t);
+    else await seekAndPlay(t);
     prev = t;
+    const frames = await sampleFrames(1000);
+    const mean = (f) => frames.reduce((s, x) => s + f(x), 0) / frames.length;
+    const activity = mean((x) => x.low.activity + x.melody.activity);
     const st = await state();
     const a = await aurora();
     const file = AURORA_SHOTS.includes(t) ? path.join(dir, `aurora-${fmt(t).replace(':', 'm')}.png`) : null;
     const f = await frameStats(page, file);
-    rows.push({ t, ...a, lum: f.lum, frameHue: f.hue, frameHueName: f.hueName, fps: st.fps, stage: st.stage, file });
-    console.log(`  ${fmt(t).padStart(7)}  ${a.amp.toFixed(2)}   ${a.hues.map((h) => h.toFixed(2)).join(' ')}    ${String(a.pulses).padStart(2)}     ${f.lum.toFixed(3)}  ${String(f.hue).padStart(3)}° ${f.hueName.padEnd(7)}  ${st.fps.toFixed(0)}  ${st.stage}${file ? '  [shot]' : ''}`);
+    const row = { t, amp: a.amp, low: mean((x) => x.low.active), melody: mean((x) => x.melody.active), melodyHeight: a.melodyHeight, lowNote: a.lowNote, activity, lum: f.lum, fps: st.fps, stage: st.stage, file };
+    rows.push(row);
+    console.log(
+      `  ${fmt(t).padStart(7)}  ${a.amp.toFixed(2)}   ${row.low.toFixed(1).padStart(4)} / ${row.melody.toFixed(1).padEnd(5)}     ${a.melodyHeight.toFixed(2)}      ${(a.lowNote >= 0 ? names[a.lowNote] : '-').padEnd(3)}      ${activity.toFixed(2).padStart(5)}    ${f.lum.toFixed(3)}  ${st.fps.toFixed(0)}  ${st.stage}${file ? '  [shot]' : ''}`,
+    );
   }
-  // the hue following the melody: one sample per second over AURORA_TRACE
-  const trace = [];
+
+  // (a) a melodic span: packets spawned against the notes of each voice
   await seekAndPlay(AURORA_TRACE[0]);
-  for (let t = AURORA_TRACE[0]; t <= AURORA_TRACE[1]; t += 1) {
-    await seekAndPlay(t, 0);
-    const a = await aurora();
-    const m = await page.evaluate(() => window.__resonance.perf.height);
-    trace.push({ t, melody: m, hues: a.hues, fired: a.fired });
+  const before = await aurora();
+  await playTo(AURORA_TRACE[1]);
+  const after = await aurora();
+  const count = (n) => n.times.filter((t) => t >= AURORA_TRACE[0] && t < AURORA_TRACE[1]).length;
+  const notes = { melody: count(analysis.voices.melody.notes), low: count(analysis.voices.low.notes) };
+  const span = {
+    melodyNotes: notes.melody,
+    lowNotes: notes.low,
+    melodyHeard: after.melody.heard - before.melody.heard,
+    lowHeard: after.low.heard - before.low.heard,
+    melodySpawned: after.melody.spawned - before.melody.spawned,
+    lowSpawned: after.low.spawned - before.low.spawned,
+    melodySpeed: after.melody.speed,
+    lowSpeed: after.low.speed,
+  };
+  console.log(`  melodic span ${fmt(AURORA_TRACE[0])}-${fmt(AURORA_TRACE[1])}: melody ${span.melodyNotes} notes (${span.melodyHeard} heard) -> ${span.melodySpawned} packets · low ${span.lowNotes} notes (${span.lowHeard} heard) -> ${span.lowSpawned} packets · speed melody ${span.melodySpeed.toFixed(3)} / low ${span.lowSpeed.toFixed(3)} screens/s`);
+
+  // (b) travel: every packet's position moves monotonically in its layer's direction, frame to frame
+  await seekAndPlay(AURORA_SEQ - 2);
+  const frames = await sampleFrames(1200);
+  const travel = { checked: 0, wrong: 0, distance: { low: [], melody: [] } };
+  for (const [name, dirn] of [['low', 1], ['melody', -1]]) {
+    const seen = new Map();
+    for (const fr of frames) {
+      for (const p of fr[name].packets) {
+        const last = seen.get(p.id);
+        if (last !== undefined) {
+          travel.checked++;
+          if ((p.x - last.x) * dirn < -1e-6) travel.wrong++;
+          last.d += Math.abs(p.x - last.x);
+          last.x = p.x;
+        } else seen.set(p.id, { x: p.x, d: 0 });
+      }
+    }
+    travel.distance[name] = [...seen.values()].map((v) => v.d);
   }
-  console.log(`  hue trace ${fmt(AURORA_TRACE[0])}-${fmt(AURORA_TRACE[1])} (melody height -> ribbon hues):`);
-  for (const r of trace) console.log(`     ${fmt(r.t)}  melody ${r.melody.toFixed(2)}  hues ${r.hues.map((h) => h.toFixed(2)).join(' ')}`);
+  const avg = (a) => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0);
+  console.log(`  travel over ${frames.length} frames: ${travel.checked} packet steps, ${travel.wrong} backwards · mean distance in 1.2 s: low ${avg(travel.distance.low).toFixed(3)}, melody ${avg(travel.distance.melody).toFixed(3)} screen widths`);
+
+  // a short frame sequence (5 frames over ~1 s) to see the movement
+  await playTo(AURORA_SEQ);
+  const seq = [];
+  for (let i = 0; i < 5; i++) {
+    const t0 = Date.now();
+    const file = path.join(dir, `aurora-seq-${i}.png`);
+    await page.screenshot({ path: file });
+    seq.push({ t: await page.evaluate(() => window.__resonance.perf.t), file });
+    await sleep(Math.max(0, 250 - (Date.now() - t0)));
+  }
+  console.log(`  sequence: ${seq.map((s) => fmt(s.t)).join(', ')}`);
 
   const at = (t) => rows.find((r) => r.t === t);
-  const quiet = Math.max(...AURORA_QUIET.map((t) => at(t).amp));
-  const peak = at(290).amp;
-  const hueRange = Math.max(...trace.flatMap((r) => r.hues)) - Math.min(...trace.flatMap((r) => r.hues));
+  const quiet = Math.max(...AURORA_QUIET.map((t) => at(t).activity));
+  const peak = at(290).activity;
   const checks = {
-    quietFaint: quiet < 0.35,
-    grows: at(260).amp > quiet + 0.2,
-    peaksAtClimax: rows.every((r) => r.amp <= peak + 1e-3),
-    smallerAfter: at(311).amp < peak * 0.8,
+    melodyPerNote: span.melodySpawned >= 0.75 * span.melodyNotes && span.melodySpawned <= span.melodyNotes,
+    lowFewer: span.lowSpawned <= 0.6 * span.melodySpawned,
+    lowSlower: span.lowSpeed < 0.6 * span.melodySpeed,
+    travels: travel.checked > 20 && travel.wrong === 0,
+    quietLow: quiet < 0.4 * peak,
+    peaksAtClimax: rows.every((r) => r.activity <= peak + 1e-3) && rows.every((r) => r.amp <= at(290).amp + 1e-3),
+    lowerAfter: at(311).activity < peak && at(311).amp < 0.8 * at(290).amp,
     neverBlank: rows.every((r) => r.amp > 0.04),
-    hueMoves: hueRange > 0.1,
   };
   const ok = (v) => (v ? 'PASS' : 'FAIL');
-  console.log(`  quiet (0:10, 3:25, 5:50) max amp ${quiet.toFixed(2)} -> ${ok(checks.quietFaint)} faint · build 4:20 ${at(260).amp.toFixed(2)} -> ${ok(checks.grows)} grows`);
-  console.log(`  climax 4:50 ${peak.toFixed(2)} -> ${ok(checks.peaksAtClimax)} peak · 5:11 ${at(311).amp.toFixed(2)} (${((at(311).amp / peak) * 100).toFixed(0)} %) -> ${ok(checks.smallerAfter)} clearly smaller · ${ok(checks.neverBlank)} never blank`);
-  console.log(`  hue range over the trace ${hueRange.toFixed(2)} ramp units -> ${ok(checks.hueMoves)} moves with the melody`);
-  return { rows, trace, checks };
+  console.log(`  (a) melody ${span.melodySpawned}/${span.melodyNotes} notes -> ${ok(checks.melodyPerNote)} one per note · low ${span.lowSpawned} -> ${ok(checks.lowFewer)} far fewer · ${ok(checks.lowSlower)} slower`);
+  console.log(`  (b) ${ok(checks.travels)} packets travel monotonically`);
+  console.log(`  (c) quiet (0:10, 3:25, 5:50) max activity ${quiet.toFixed(2)} vs 4:50 ${peak.toFixed(2)} -> ${ok(checks.quietLow)} low · ${ok(checks.peaksAtClimax)} peaks at 4:50 · 5:11 ${at(311).activity.toFixed(2)} (amp ${((at(311).amp / at(290).amp) * 100).toFixed(0)} %) -> ${ok(checks.lowerAfter)} lower · ${ok(checks.neverBlank)} never blank`);
+  return { rows, span, travel: { checked: travel.checked, wrong: travel.wrong }, seq, checks };
 }
 
 main().catch((err) => {

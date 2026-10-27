@@ -15,15 +15,16 @@
  *     brighter, the green body warming toward gold, a pink-white crown)
  *   - accented piano attacks send a soft shimmer through the rays and a
  *     gentle colour surge, never on every note
- *   - AURORA: the curtains move like an audio wave. The live spectrum runs
- *     along them as an equaliser (low notes left, high right), every onset
- *     sends a pulse travelling along the ribbon its pitch belongs to (high
- *     notes the upper ribbon), and the melody sets the hue (low = deep green,
- *     middle = teal / blue, high = violet / purple, top = a touch of pink),
- *     each ribbon gliding toward the colour of the notes it receives; minor
- *     passages lean bluer, major ones greener. Amplitude follows the
- *     anticipating drive and the climax, so the aurora is fullest at ~4:50,
- *     clearly smaller in the 5:10 release, and a faint shimmer when quiet.
+ *   - AURORA: two layers of aurora waves travel across the sky, one per
+ *     voice of the music. Every low note or chord change (left hand) sends
+ *     a broad, slow, green swell left -> right along the far curtains; every
+ *     melody note a narrower, brighter, faster swell right -> left along the
+ *     near ones, higher in the sky for higher notes, coloured by its pitch
+ *     (teal / blue -> violet -> pink-white). The layers cross and their
+ *     light adds. Amplitude follows the anticipating drive and the climax,
+ *     so the waves are fullest and fastest at ~4:50, clearly smaller in the
+ *     5:10 release, and slow, faint drifts when quiet. Rendered as glowing
+ *     brush strokes (PAINT).
  *
  * Every constant is here; the ones in TUNE are live sliders (T).
  */
@@ -54,11 +55,17 @@ export const PROFILE = {
   // accented onsets -> a soft shimmer and colour surge (decaying slowly)
   ACCENT: { SHIMMER: 0.5, SURGE: 0.15, DECAY: 1.4, MIN_STRENGTH: 0.55 },
 
-  // ------------------------------------------------------- the audio-wave aurora
+  // ------------------------------------------------------- the two-layer wave aurora
+  // Two layers of travelling wave packets, one per voice of the music
+  // (src/voices.js, audio.perf.voices): every note spawns a soft aurora swell
+  // that runs along its layer's curtains across the sky, widening and fading,
+  // then leaves off the far side. Curtains: 0 = nearest (spans the upper sky)
+  // ... 3 = farthest (low, near the horizon). Positions and widths are in
+  // screen widths. Packets are evaluated in one pass from a fixed uniform
+  // array (MAX_PACKETS = 12 per layer in curtains.frag), so the cost never
+  // grows with the note count.
   AURORA: {
-    // ribbon k = the scene's curtain k: 0 is the nearest (spans the upper sky), 2 the farthest (low, near the horizon)
-    RIBBONS: 3,
-    // amplitude 0..1: wave size, brightness and speed.
+    // amplitude 0..1 (overall size, brightness and speed of the waves):
     //   FLOOR + BUILD × build + CLIMAX × climax^CLIMAX_CURVE, × the section stage, smoothed
     // (build is the score's anticipating drive: it rises ahead of a crescendo)
     AMP: {
@@ -70,61 +77,102 @@ export const PROFILE = {
       ATTACK: 0.8, // s
       RELEASE: 2.5,
     },
-    // amplitude -> curtain shape and motion, [quiet, full]
-    WAVE: {
-      HEIGHT: [0.5, 1.0], // curtain height (× the profile's HEIGHT)
-      FOLD: [0.35, 1.3], // ripple amplitude
-      SPEED: [0.45, 1.25], // × the scene clock
-      BRIGHT: [0.75, 1.2],
+    // quiet / loud scaling by the amplitude, [quiet, loud]
+    SCALE: {
+      SPEED: [0.55, 1.6], // × each layer's SPEED: slow drifting waves when quiet, fast at the climax
+      SIZE: [0.75, 1.15], // × packet width and lift
+      BRIGHT: [0.6, 1.0], // × packet brightness
+      HEIGHT: [0.7, 1.05], // × curtain height (also the profile's HEIGHT)
+      FOLD: [0.35, 1.0], // ripple amplitude of the curtains
     },
-    // live spectrum along the curtains: an equaliser, low notes left, high right
-    SPECTRUM: {
-      BANDS: 48, // must match SPEC_BANDS in curtains.frag
-      HZ: [55, 4200], // log-spaced band edges
-      GATE: 0.32, // analyser level (0..1) below which a band counts as silent
-      CURVE: 1.5,
-      ATTACK: 0.05, // s: fast attack ...
-      RELEASE: 0.6, // ... slow release
-      HEIGHT: 0.45, // extra curtain height at a full band (× amplitude)
-      BRIGHT: 0.9, // extra brightness at a full band (× amplitude)
-    },
-    // note onsets -> pulses travelling along a ribbon
-    PULSE: {
-      MAX: 12, // must match MAX_PULSES in curtains.frag
-      MAX_PER_SECOND: 8, // accompaniment notes beyond this are skipped
-      LIFE: 1.8, // s
-      ATTACK: 0.08, // s
-      DECAY: 0.6, // s (exponential, after the attack)
-      SPEED: [0.06, 0.22], // screen widths per second, [quiet, full]
-      WIDTH: [0.035, 0.07], // screen widths, grows as it travels
-      BRIGHT: 2.0, // brightness added at the pulse's centre (× strength)
-      LIFT: 0.45, // curtain height added (× strength)
-      ACCOMPANIMENT: 0.45, // strength of non-melody onsets (melody = 1)
-      X: [0.1, 0.9], // pitch height -> starting position across the screen (low left, high right)
-    },
-    // colour: a ramp the melody's pitch height moves along (OKLab-ish, sRGB stops)
-    RAMP: [
-      [0.0, '#0d8a4c'], // deep green
-      [0.28, '#17c49a'], // teal
-      [0.48, '#2b8cff'], // blue
-      [0.68, '#7650ff'], // violet
-      [0.86, '#b14ae6'], // purple
-      [1.0, '#ffd2ef'], // pink-white accent
-    ],
-    HUE: {
-      RANGE: [0.04, 0.96], // melody height 0..1 -> ramp position
-      MELODY_SMOOTHING: 1.2, // s, the global (base) hue following the melody
-      ATTACK: 0.6, // s, a ribbon gliding to a note's hue
-      RELEASE: 1.5, // s, ...and back to the base hue
-      HOLD: 0.6, // s a note's hue is held as the ribbon's target
-      PULL: 0.7, // how far a note pulls its ribbon from the base hue toward its own (1 = all the way)
-      CHROMA_DEG: 15, // pitch class -> +/- hue twist
-      KEY_BIAS: { minor: 0.08, major: -0.08 }, // minor cooler / bluer, major greener / warmer (ramp units)
-      KEY_SMOOTHING: 5, // s
-      SPREAD: [0.03, 0.12], // ribbons fan out along the ramp, [quiet, full]: multi-coloured at the climax
-      CREST: 0.22, // the crown sits this far further up the ramp (toward violet / pink)
-    },
+    GLOW: 0.08, // faint light along every curtain without packets (× amplitude): never empty
+    BLEND: 'add', // how crossing layers combine: 'add' or 'screen' (softer where both are bright)
     CAP: 0.95, // per-pixel brightness cap (HDR, soft knee): the aurora never washes out the scene
+    KEY_BIAS: { minor: 0.08, major: -0.08 }, // ramp shift: minor cooler (bluer), major greener
+    KEY_SMOOTHING: 5, // s
+    CREST: 0.18, // the curtain crown sits this far further along its layer's ramp
+
+    // the low register (bass notes, low chord tones): broad, slow, heavy waves, left -> right
+    LOW: {
+      POOL: 10, // live packets (max 12)
+      MIN_STRENGTH: 0.2, // weaker notes spawn nothing (note strength 0..1)
+      MIN_GAP: 0.4, // s between two packets of this layer
+      CURTAINS: [3, 2], // [low note, high note]: the curtain a packet rides (fractional = between two)
+      DIRECTION: 1, // +1 = left -> right
+      START: [-0.12, 0.25], // screen x where packets enter (random within)
+      SPEED: 0.07, // screen widths per second (× SCALE.SPEED)
+      PITCH_SPEED: 0, // higher notes travel this much faster (share)
+      WIDTH: [0.1, 0.22], // packet width at birth -> at the end of its life (it widens as it travels)
+      FRONT: 0.85, // leading edge width (× WIDTH): < 1 = a crisper front
+      LIFE: 9, // s
+      FADE_IN: 0.3, // s (raised cosine), peaking on the note
+      DECAY: 4.5, // s, exponential fade after the peak
+      FADE_OUT: 2.5, // s, the last part of the life fades to 0
+      HEIGHT: 0.45, // base height of its curtains (× the scene's curtain height)
+      LIFT: 0.2, // extra height at a packet's centre (× strength)
+      BRIGHT: 0.85, // brightness at a packet's centre (× strength)
+      BEND: 1.6, // how far a packet bows its curtain toward the viewer (map units): the swell
+      CURVE: 3, // the curtain path bends into a long arc (map units at the screen edges)
+      STRIATION: 1.1, // vertical ray frequency (gentle)
+      SHEET: 1.9, // curtain thickness (wide)
+      // colour: deep green -> teal, the packet's place set by the low note's height,
+      // the dominant low note twisting it by up to +/- HUE_DEG
+      RAMP: [
+        [0.0, '#0a7a45'],
+        [0.5, '#0fa36f'],
+        [1.0, '#17bfa6'],
+      ],
+      HUE_RANGE: [0.1, 0.9],
+      HUE_DEG: 15,
+    },
+
+    // the melody (the singing top line): narrower, brighter, faster waves, right -> left
+    MELODY: {
+      POOL: 12,
+      MIN_STRENGTH: 0.05,
+      MIN_GAP: 0.08,
+      CURTAINS: [1, 0], // [low note, high note]: high notes ride the near curtain, higher in the sky
+      DIRECTION: -1, // right -> left: crosses the low layer
+      START: [0.8, 1.1],
+      SPEED: 0.16,
+      PITCH_SPEED: 0.35, // the highest notes travel 35 % faster than the lowest
+      WIDTH: [0.045, 0.11],
+      FRONT: 0.45, // a crisp leading edge
+      LIFE: 5,
+      FADE_IN: 0.15,
+      DECAY: 2.2,
+      FADE_OUT: 1.2,
+      HEIGHT: 0.75, // [× the scene's curtain height]; the note's height adds HEIGHT_PITCH
+      HEIGHT_PITCH: 0.35, // high notes reach higher into the sky
+      LIFT: 0.4,
+      BRIGHT: 2.2,
+      BEND: 0.9,
+      CURVE: 2,
+      STRIATION: 4.2, // finer rays
+      SHEET: 1.0,
+      // colour: teal / blue -> violet -> a hint of pink-white at the top, by the note's height
+      RAMP: [
+        [0.0, '#16b9b0'],
+        [0.3, '#2b8cff'],
+        [0.62, '#7650ff'],
+        [0.84, '#b14ae6'],
+        [1.0, '#ffd8f0'],
+      ],
+      HUE_RANGE: [0.04, 0.97],
+      HUE_DEG: 15, // the note's pitch class twists its hue by up to +/- this
+    },
+
+    // painterly rendering of the aurora (landscape.frag): short directional brush strokes
+    // along long arcs that sweep around a centre above the sky, with impasto highlights
+    PAINT: {
+      STROKE: 0.6, // 0 = smooth light, 1 = fully broken into strokes
+      LENGTH: 0.075, // stroke length (screen heights)
+      WIDTH: 0.012, // stroke width (screen heights)
+      SMEAR: 0.016, // the light is dragged this far along the stroke (screen heights)
+      IMPASTO: 0.35, // whitish highlight on the ridge of bright strokes
+      SKY: 0.1, // the bare sky gets a faint stroke texture too
+      CENTRE: [0.5, 1.5], // swirl centre the strokes curve around (screen x, height)
+    },
   },
 };
 
@@ -140,16 +188,20 @@ export const TUNE = [
   ['WARM.CLIMAX', 'climax warmth', 0, 1, 0.05],
   ['BRIGHT.QUIET', 'quiet brightness', 0, 1, 0.01],
   ['ACCENT.SHIMMER', 'accent shimmer', 0, 1.5, 0.05],
-  { group: 'audio-wave aurora' },
+  { group: 'wave aurora' },
   ['AURORA.AMP.FLOOR', 'quiet floor', 0, 0.4, 0.01],
   ['AURORA.AMP.CLIMAX', 'climax amplitude', 0, 1, 0.05],
-  ['AURORA.SPECTRUM.HEIGHT', 'spectrum height', 0, 1.2, 0.05],
-  ['AURORA.SPECTRUM.BRIGHT', 'spectrum brightness', 0, 2, 0.05],
-  ['AURORA.SPECTRUM.GATE', 'spectrum gate', 0, 0.8, 0.01],
-  ['AURORA.PULSE.BRIGHT', 'pulse brightness', 0, 4, 0.05],
-  ['AURORA.PULSE.LIFT', 'pulse lift', 0, 1.2, 0.05],
-  ['AURORA.PULSE.DECAY', 'pulse decay (s)', 0.1, 2, 0.05],
-  ['AURORA.HUE.ATTACK', 'hue glide (s)', 0.1, 1.5, 0.05],
-  ['AURORA.HUE.CHROMA_DEG', 'pitch-class hue twist (°)', 0, 30, 1],
+  ['AURORA.GLOW', 'curtain glow', 0, 0.5, 0.01],
   ['AURORA.CAP', 'brightness cap', 0.4, 3, 0.05],
+  ['AURORA.LOW.BRIGHT', 'low: brightness', 0, 4, 0.05],
+  ['AURORA.LOW.SPEED', 'low: speed', 0.01, 0.3, 0.005],
+  ['AURORA.LOW.MIN_GAP', 'low: min gap (s)', 0, 2, 0.05],
+  ['AURORA.LOW.MIN_STRENGTH', 'low: min strength', 0, 1, 0.01],
+  ['AURORA.MELODY.BRIGHT', 'melody: brightness', 0, 5, 0.05],
+  ['AURORA.MELODY.SPEED', 'melody: speed', 0.02, 0.6, 0.01],
+  ['AURORA.MELODY.LIFT', 'melody: lift', 0, 1.2, 0.05],
+  ['AURORA.MELODY.HUE_DEG', 'melody: pitch-class twist (°)', 0, 30, 1],
+  ['AURORA.PAINT.STROKE', 'paint: strokes', 0, 1, 0.05],
+  ['AURORA.PAINT.IMPASTO', 'paint: impasto', 0, 1, 0.05],
+  ['AURORA.PAINT.SMEAR', 'paint: smear', 0, 0.04, 0.001],
 ];

@@ -28,6 +28,12 @@
  *                      height 0..1 over melody.range, and how clear it is
  *   chroma             12-bin pitch-class frames (C..B, max = 1) at chromaRate
  *   onsets.times / strength   spectral-flux onsets, strength 0..1
+ *   voices.low         the low register (bass notes, low chord tones; src/voices.js):
+ *                      hz / height / confidence curves, `note` (dominant low pitch
+ *                      class of the smoothed low-register chroma, per chroma frame,
+ *                      -1 = none) and notes { times, strength, height, pc }
+ *   voices.melody      the singing top line: hz / height / confidence curves over its
+ *                      own register, range [lo, hi] Hz, notes { times, strength, height, pc }
  *   tempo { bpm, confidence }, beats [s]
  *   keys.windows       Krumhansl key estimate per 15 s window (5 s hop)
  *   keys.regions       the same merged into regions
@@ -39,6 +45,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PIECES, pieceForFile, MUSIC_DIR, ANALYSIS_DIR } from '../src/pieces.js';
+import { VOICES } from '../src/voices.js';
 
 // ====================================================================== config
 const CONFIG = {
@@ -234,6 +241,8 @@ function frameFeatures(x) {
   const bandBins = Object.fromEntries(Object.entries(BANDS).map(([k, [lo, hi]]) => [k, [toBin(lo), toBin(hi)]]));
   const [f0, f1] = [toBin(ONSET.FMIN), toBin(ONSET.FMAX)];
   const [c0, c1] = [toBin(50), toBin(10000)];
+  const [l0, l1] = VOICES.LOW.FLUX_HZ.map(toBin);
+  const [h0, h1] = VOICES.MELODY.FLUX_HZ.map(toBin);
 
   // chroma folding on the long spectrum
   const chromaMap = [];
@@ -249,6 +258,8 @@ function frameFeatures(x) {
   const band = Object.fromEntries(Object.keys(BANDS).map((k) => [k, new Float64Array(frames)]));
   const centroid = new Float64Array(frames);
   const flux = new Float64Array(frames);
+  const fluxLow = new Float64Array(frames); // the low register (voices.low attacks)
+  const fluxHigh = new Float64Array(frames); // the melody register (voices.melody attacks)
   const chroma = Array.from({ length: frames }, () => new Float32Array(12));
   const longMags = new Array(frames); // compressed long spectra for the melody (kept only up to ~5 kHz)
   const longKeep = Math.min(binsLong, Math.ceil(5200 / hzLong));
@@ -284,13 +295,17 @@ function frameFeatures(x) {
       band[name][i] = s;
     }
     // SuperFlux-style: compare against the max of the neighbouring previous bins (ignores vibrato)
-    let fl = 0;
-    for (let k = f0; k < f1; k++) {
-      const prev = Math.max(prevLog[k - 1], prevLog[k], prevLog[k + 1]);
-      const d = curLog[k] - prev;
-      if (d > 0) fl += d;
-    }
-    flux[i] = i === 0 ? 0 : fl / (f1 - f0);
+    const bandFlux = (lo, hi) => {
+      let fl = 0;
+      for (let k = lo; k < hi; k++) {
+        const d = curLog[k] - Math.max(prevLog[k - 1], prevLog[k], prevLog[k + 1]);
+        if (d > 0) fl += d;
+      }
+      return i === 0 ? 0 : fl / (hi - lo);
+    };
+    flux[i] = bandFlux(f0, f1);
+    fluxLow[i] = bandFlux(l0, l1);
+    fluxHigh[i] = bandFlux(h0, h1);
     [prevLog, curLog] = [curLog, prevLog];
 
     const ml = specLong(x, centre);
@@ -300,7 +315,7 @@ function frameFeatures(x) {
     for (let k = 0; k < longKeep; k++) comp[k] = Math.log1p(100 * ml[k]);
     longMags[i] = comp;
   }
-  return { frames, power, weighted, band, centroid, flux, chroma, longMags, hzLong };
+  return { frames, power, weighted, band, centroid, flux, fluxLow, fluxHigh, chroma, longMags, hzLong };
 }
 
 // ------------------------------------------------------------------ loudness
@@ -336,9 +351,8 @@ function normaliseBands(f) {
 
 // -------------------------------------------------------------------- onsets
 
-function detectOnsets(flux, levelDb) {
+function detectOnsets(flux, levelDb, O = CONFIG.ONSET) {
   const fps = CONFIG.SR / CONFIG.HOP;
-  const O = CONFIG.ONSET;
   const env = flux;
   const med = movingMedian(env, Math.round(O.MEDIAN * fps * 2));
   const scale = percentile(env, 95);
@@ -560,8 +574,8 @@ function estimateKeys(f, power, duration) {
 
 // --------------------------------------------------------------------- melody
 
-function melody(f, levelDb) {
-  const M = CONFIG.MELODY;
+function melody(f, levelDb, opts = {}) {
+  const M = { ...CONFIG.MELODY, ...opts };
   const hzLong = f.hzLong;
   const steps = Math.floor(12 * M.STEPS_PER_SEMITONE * Math.log2(M.FMAX / M.FMIN)) + 1;
   const cand = Float64Array.from({ length: steps }, (_, i) => M.FMIN * 2 ** (i / (12 * M.STEPS_PER_SEMITONE)));
@@ -651,6 +665,222 @@ function melody(f, levelDb) {
   const hi = 2 ** percentile(confident, 97);
   const height = Float64Array.from(hzOut, (h) => (h > 0 ? clamp01(Math.log2(h / lo) / Math.log2(hi / lo)) : 0));
   return { hz: hzOut, height, confidence: conf, range: [round(lo, 1), round(hi, 1)] };
+}
+
+// --------------------------------------------------------------------- voices
+
+const NOTE_OF = (hz) => (((Math.round(12 * Math.log2(hz / 440)) + 9) % 12) + 12) % 12;
+
+/** Merge two sorted onset lists, keeping the stronger of any two closer than `gap` s. */
+function mergeOnsets(a, b, gap) {
+  const all = [...a, ...b].sort((x, y) => x.t - y.t);
+  const out = [];
+  for (const o of all) {
+    const last = out[out.length - 1];
+    if (last && o.t - last.t < gap) {
+      if (o.strength > last.strength) last.strength = o.strength;
+    } else out.push({ ...o });
+  }
+  return out;
+}
+
+/**
+ * The low voice (VOICES.LOW): pitch of the strongest low note (harmonic sum
+ * over the register, the fundamental required), a smoothed low-register
+ * chroma and its dominant pitch class, and onsets = low-register flux peaks
+ * plus chord changes (the low chroma turning) without a fresh bass attack.
+ */
+function lowVoice(f, loud) {
+  const V = VOICES.LOW;
+  const fps = CONFIG.SR / CONFIG.HOP;
+  const hzLong = f.hzLong;
+  const [lo, hi] = V.REGISTER_HZ;
+  const keep = f.longMags[0].length;
+  const m0 = Math.ceil(12 * Math.log2(lo / 440));
+  const m1 = Math.floor(12 * Math.log2(hi / 440));
+  const cands = [];
+  for (let m = m0; m <= m1; m++) {
+    const hz = 440 * 2 ** (m / 12);
+    const ranges = [];
+    for (let h = 1; h <= V.HARMONICS; h++) {
+      const a = Math.floor((hz * h * 2 ** (-0.5 / 12)) / hzLong);
+      const b = Math.ceil((hz * h * 2 ** (0.5 / 12)) / hzLong);
+      if (b < keep) ranges.push([a, b, 0.8 ** (h - 1)]);
+    }
+    cands.push({ hz, pc: NOTE_OF(hz), ranges });
+  }
+  const n = f.frames;
+  const hzOut = new Float64Array(n);
+  const conf = new Float64Array(n);
+  const chroma = Array.from({ length: n }, () => new Float64Array(12));
+  const kLo = Math.ceil(lo / hzLong);
+  const kHi = Math.floor(hi / hzLong);
+  for (let i = 0; i < n; i++) {
+    const m = f.longMags[i];
+    let best = -1;
+    let bestS = 0;
+    let total = 0;
+    for (let c = 0; c < cands.length; c++) {
+      let s = 0;
+      for (const [a, b, w] of cands[c].ranges) {
+        let mx = 0;
+        for (let k = a; k <= b; k++) if (m[k] > mx) mx = m[k];
+        s += w * mx;
+      }
+      const [fa, fb] = cands[c].ranges[0];
+      let fund = 0;
+      for (let k = fa; k <= fb; k++) if (m[k] > fund) fund = m[k];
+      s *= Math.sqrt(fund / (s / cands[c].ranges.length + 1e-9));
+      total += s;
+      if (s > bestS) {
+        bestS = s;
+        best = c;
+      }
+    }
+    const ratio = total > 0 ? bestS / (total / cands.length) : 0;
+    conf[i] = loud.level[i] < V.MIN_LEVEL ? 0 : clamp01((ratio - V.CONFIDENCE[0]) / (V.CONFIDENCE[1] - V.CONFIDENCE[0]));
+    hzOut[i] = conf[i] > 0.05 && best >= 0 ? cands[best].hz : 0;
+    for (let k = kLo; k <= kHi; k++) {
+      const midi = 69 + 12 * Math.log2((k * hzLong) / 440);
+      const near = Math.round(midi);
+      const w = Math.cos(Math.PI * (midi - near)) ** 2;
+      if (w > 0.05) chroma[i][((near % 12) + 12) % 12] += w * m[k];
+    }
+  }
+  // smoothed chroma (normalised to max 1) and its dominant class
+  const sw = Math.max(1, Math.round(V.CHROMA_SMOOTH * fps));
+  const smooth = Array.from({ length: n }, () => new Float64Array(12));
+  for (let k = 0; k < 12; k++) {
+    const col = movingAverage(Float64Array.from(chroma, (c) => c[k]), sw);
+    for (let i = 0; i < n; i++) smooth[i][k] = col[i];
+  }
+  const note = new Int8Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = smooth[i];
+    let mx = 0;
+    let arg = -1;
+    for (let k = 0; k < 12; k++) if (c[k] > mx) [mx, arg] = [c[k], k];
+    if (mx > 0) for (let k = 0; k < 12; k++) c[k] /= mx;
+    note[i] = loud.level[i] < V.MIN_LEVEL ? -1 : arg;
+  }
+  const height = movingMedian(
+    Float64Array.from(hzOut, (h) => (h > 0 ? clamp01(Math.log2(h / lo) / Math.log2(hi / lo)) : 0)),
+    5,
+  );
+
+  // onsets: flux peaks in the low register ...
+  const flux = detectOnsets(f.fluxLow, loud.db, V.ONSET);
+  const attacks = flux.times.map((t, j) => ({ t, strength: flux.strength[j] }));
+  // ... and chord changes: the low chroma 0.3 s before against 0.3 s after
+  const span = Math.round(0.3 * fps);
+  const dist = new Float64Array(n);
+  for (let i = span; i < n - span; i++) {
+    const a = new Float64Array(12);
+    const b = new Float64Array(12);
+    for (let j = 0; j < span; j++)
+      for (let k = 0; k < 12; k++) {
+        a[k] += chroma[i - 1 - j][k];
+        b[k] += chroma[i + j][k];
+      }
+    let ab = 0;
+    let aa = 0;
+    let bb = 0;
+    for (let k = 0; k < 12; k++) [ab, aa, bb] = [ab + a[k] * b[k], aa + a[k] * a[k], bb + b[k] * b[k]];
+    dist[i] = aa > 0 && bb > 0 ? 1 - ab / Math.sqrt(aa * bb) : 0;
+  }
+  const changes = [];
+  const w = Math.round(0.15 * fps);
+  for (let i = w; i < n - w; i++) {
+    if (dist[i] < V.CHORD_CHANGE || loud.level[i] < V.MIN_LEVEL) continue;
+    let isMax = true;
+    for (let j = i - w; j <= i + w; j++) if (dist[j] > dist[i]) isMax = false;
+    if (isMax) changes.push({ t: round(i / fps, 3), strength: round(clamp01(dist[i] * 1.5), 3) });
+  }
+  const notes = mergeOnsets(attacks, changes, V.ONSET.MIN_GAP).filter((o) => loud.level[Math.round(o.t * fps)] >= V.MIN_LEVEL);
+  const at = (arr, t) => arr[Math.min(arr.length - 1, Math.max(0, Math.round(t * fps)))];
+  return {
+    range: [lo, hi],
+    hz: hzOut,
+    height,
+    confidence: conf,
+    note,
+    chroma: smooth,
+    notes: {
+      times: notes.map((o) => o.t),
+      strength: notes.map((o) => round(o.strength, 3)),
+      height: notes.map((o) => round(at(height, o.t + 0.06), 3)),
+      pc: notes.map((o) => at(note, o.t + 0.1)),
+    },
+    stats: { attacks: attacks.length, changes: changes.length },
+  };
+}
+
+/**
+ * The melody voice (VOICES.MELODY): the predominant pitch over its own
+ * register, and notes = a pitch step of at least STEP semitones that holds
+ * HOLD s, or an upper-register attack while voiced.
+ */
+function melodyVoice(f, loud) {
+  const V = VOICES.MELODY;
+  const fps = CONFIG.SR / CONFIG.HOP;
+  const mel = melody(f, loud.db, { FMIN: V.REGISTER_HZ[0], FMAX: V.REGISTER_HZ[1] });
+  const n = f.frames;
+  const attack = new Uint8Array(n);
+  const at = detectOnsets(f.fluxHigh, loud.db, V.ATTACK);
+  for (const t of at.times) attack[Math.round(t * fps)] = 1;
+  const top = percentile(f.fluxHigh, 99.5);
+  const mid = percentile(f.fluxHigh, 50);
+  const hold = Math.max(1, Math.round(V.HOLD * fps));
+  const voiced = (i) => mel.confidence[i] >= V.MIN_CONF && mel.hz[i] > 0;
+  const semi = (i) => 12 * Math.log2(mel.hz[i] / 440);
+  const times = [];
+  let cur = NaN;
+  let pending = -1;
+  let last = -Infinity;
+  const push = (i) => {
+    const t = i / fps;
+    if (t - last < V.MIN_GAP) return;
+    last = t;
+    times.push(i);
+  };
+  for (let i = 0; i < n; i++) {
+    if (!voiced(i)) {
+      pending = -1;
+      if (loud.level[i] < 0.05) cur = NaN;
+      continue;
+    }
+    const s = semi(i);
+    if (!(Math.abs(s - cur) < V.STEP)) {
+      // a new pitch: it must hold before it counts (backdated to where it started)
+      if (pending < 0 || Math.abs(s - semi(pending)) >= 0.5) pending = i;
+      else if (i - pending + 1 >= hold) {
+        cur = semi(pending);
+        push(pending);
+        pending = -1;
+      }
+    } else {
+      pending = -1;
+      // the same pitch struck again: only a clear attack (repeated accompaniment chords stay out)
+      if (attack[i] && (f.fluxHigh[i] - mid) / Math.max(1e-9, top - mid) >= V.REATTACK) push(i);
+    }
+  }
+  const notes = times.map((i) => {
+    let fl = 0;
+    for (let j = Math.max(0, i - 1); j <= Math.min(n - 1, i + 2); j++) fl = Math.max(fl, f.fluxHigh[j]);
+    const strength = clamp01(0.3 * loud.level[i] + 0.7 * clamp01((fl - mid) / Math.max(1e-9, top - mid)));
+    const j = Math.min(n - 1, i + 2);
+    return { t: round(i / fps, 3), strength: round(strength, 3), height: round(mel.height[j], 3), pc: mel.hz[j] > 0 ? NOTE_OF(mel.hz[j]) : -1 };
+  });
+  return {
+    ...mel,
+    notes: {
+      times: notes.map((o) => o.t),
+      strength: notes.map((o) => o.strength),
+      height: notes.map((o) => o.height),
+      pc: notes.map((o) => o.pc),
+    },
+    stats: { attacks: at.times.length },
+  };
 }
 
 // ------------------------------------------------------------------- sections
@@ -895,6 +1125,10 @@ function summary(a) {
   lines.push(`   duration  ${fmtTime(a.duration)}   tempo ~${a.tempo.bpm} bpm (confidence ${a.tempo.confidence})   ${a.beats.length} beats, ${a.onsets.times.length} onsets (${(a.onsets.times.length / a.duration).toFixed(1)}/s)`);
   lines.push(`   loudness  p5 ${p.p5} · p50 ${p.p50} · p95 ${p.p95} · max ${p.max} dBFS   dynamic range (p95 - p5) ${(p.p95 - p.p5).toFixed(1)} dB`);
   lines.push(`   melody    ${a.melody.range[0]}-${a.melody.range[1]} Hz (p3-p97 of confident frames)`);
+  if (a.voices) {
+    const v = a.voices;
+    lines.push(`   voices    low ${v.low.range[0]}-${v.low.range[1]} Hz: ${v.low.notes.times.length} notes (${(v.low.notes.times.length / a.duration).toFixed(1)}/s)  ·  melody ${v.melody.range[0]}-${v.melody.range[1]} Hz: ${v.melody.notes.times.length} notes (${(v.melody.notes.times.length / a.duration).toFixed(1)}/s)`);
+  }
   lines.push(`   keys      ${a.keys.regions.map((r) => `${fmtTime(r.start)} ${r.key}`).join('  ·  ')}`);
   lines.push('   sections');
   lines.push('     #  start    end      len   role     label         mood  level  start→end  peak @');
@@ -940,6 +1174,8 @@ async function analyse(file, piece) {
   const chroma = chromaFrames(f, f.power);
   const keys = estimateKeys(f, f.power, duration);
   const mel = melody(f, loud.db);
+  const low = lowVoice(f, loud);
+  const lead = melodyVoice(f, loud);
   const sections = segment(f, loud, bands, duration, manual);
   const climax = climaxes(loud, duration);
 
@@ -961,6 +1197,17 @@ async function analyse(file, piece) {
     melody: { hz: curve(mel.hz, 1), height: curve(mel.height, 3), confidence: curve(mel.confidence, 2), range: mel.range },
     chroma,
     onsets,
+    voices: {
+      low: {
+        range: low.range,
+        hz: curve(low.hz, 1),
+        height: curve(low.height, 3),
+        confidence: curve(low.confidence, 2),
+        note: curve(low.note, 0, CONFIG.CHROMA.DECIMATE),
+        notes: low.notes,
+      },
+      melody: { range: lead.range, hz: curve(lead.hz, 1), height: curve(lead.height, 3), confidence: curve(lead.confidence, 2), notes: lead.notes },
+    },
     beats,
     keys,
     sections,

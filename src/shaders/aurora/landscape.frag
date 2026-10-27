@@ -4,9 +4,16 @@
 // from the low-resolution aurora pass, sampled directly for the sky and
 // mirrored + rippled for the water. tAmbient (1x1) holds the average aurora
 // light, used to light the snow, the rocks and the shoreline.
+// The aurora is laid on like glowing paint (paintedAurora): short directional
+// brush strokes along long arcs sweeping around a centre above the sky,
+// the light dragged along each stroke, bristle lines and an impasto
+// highlight on the ridge of bright strokes; the bare sky shows a faint
+// trace of the same strokes, and is never covered (the light is added).
 // ---------------------------------------------------------------------------
 
 uniform sampler2D tAurora;
+uniform vec4 uPaint;   // x = stroke amount, y = stroke length, z = stroke width, w = smear (screen heights)
+uniform vec4 uPaint2;  // x = impasto, y = sky strokes, zw = swirl centre (screen x, height)
 uniform sampler2D tTerrain;
 uniform sampler2D tAmbient;
 varying vec2 vUv;
@@ -36,6 +43,50 @@ vec3 starField(vec2 uv) {
   return col;
 }
 
+// The brush stroke under screen position uv: x = paint (0 in the gaps, up to ~1.4),
+// y = ridge (the stroke's crest), z = the stroke's random id; dir = the stroke direction (uv units).
+vec3 brush(vec2 uv, out vec2 dir) {
+  vec2 p = vec2((uv.x - uPaint2.z) * uAspect, uv.y - uPaint2.w);
+  float r = length(p);
+  // wobble the arcs so they never look ruled
+  r += 0.025 * (vnoise(p * 3.0) - 0.5) + 0.006 * (vnoise(p * 17.0) - 0.5);
+  vec2 tang = normalize(vec2(-p.y, p.x));
+  dir = vec2(tang.x / uAspect, tang.y);
+  float along = atan(p.x, -p.y) * r;
+  float W = uPaint.z;
+  float L = uPaint.y;
+  float row = floor(r / W);
+  float fr = fract(r / W);
+  float cellA = along / L + hash11(row * 1.37) * 7.0;
+  float fa = fract(cellA);
+  float h = hash12(vec2(row, floor(cellA)));
+  // tapered ends (random length), rounded across, bristle lines inside
+  float len = 0.65 + 0.35 * h;
+  float body = smoothstep(0.0, 0.15, fa) * smoothstep(len, len - 0.25, fa);
+  float across = 1.0 - pow(abs(fr * 2.0 - 1.0), 2.5);
+  float bristle = 0.72 + 0.28 * sin(fr * 23.0 + h * 40.0);
+  float v = body * across * bristle * (0.65 + 0.7 * h);
+  float ridge = body * smoothstep(0.5, 0.95, 1.0 - abs(fr * 2.0 - 0.75));
+  return vec3(v, ridge, h);
+}
+
+vec3 paintedAurora(vec2 uv, out float stroke) {
+  vec2 dir;
+  vec3 b = brush(uv, dir);
+  stroke = b.x;
+  // the light dragged along the stroke
+  vec2 sm = dir * uPaint.w;
+  vec3 a = 0.3 * texture2D(tAurora, uv).rgb
+         + 0.2 * (texture2D(tAurora, uv + sm * 0.5).rgb + texture2D(tAurora, uv - sm * 0.5).rgb)
+         + 0.15 * (texture2D(tAurora, uv + sm).rgb + texture2D(tAurora, uv - sm).rgb);
+  // broken into strokes: the gaps keep some of the light, the strokes carry more
+  vec3 col = a * mix(1.0, 0.35 + 1.1 * b.x, uPaint.x);
+  col *= 1.0 + 0.12 * (b.z - 0.5) * uPaint.x; // stroke-to-stroke variation
+  float lum = dot(a, vec3(0.2126, 0.7152, 0.0722));
+  col += mix(a, vec3(lum * 1.3), 0.6) * b.y * uPaint2.x * smoothstep(0.01, 0.25, lum);
+  return col;
+}
+
 // Everything above the water line, for screen position uv.
 vec3 above(vec2 uv, vec3 amb, float starGain) {
   vec3 rd = viewRay(uv);
@@ -48,7 +99,10 @@ vec3 above(vec2 uv, vec3 amb, float starGain) {
   col += vec3(0.0, 0.025, 0.02) * exp(-max(rd.y, 0.0) * 14.0); // airglow
   col += vec3(0.02, 0.022, 0.03) * terrain.r;                   // Milky Way
   col += starField(uv) * starGain * (1.0 + terrain.r * 1.5);
-  col += texture2D(tAurora, uv).rgb;
+  float stroke;
+  vec3 aurora = paintedAurora(uv, stroke);
+  col *= 1.0 + uPaint2.y * (stroke - 0.5); // a faint trace of the strokes in the bare sky
+  col += aurora;
 
   // mountains: near range (darker) in front of the far range (hazy, aurora-lit snow)
   if (terrain.b > 0.75) {

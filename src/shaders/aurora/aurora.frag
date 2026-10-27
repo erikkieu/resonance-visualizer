@@ -9,36 +9,43 @@
 // every slice re-samples the same footprint, the light stacks into tall
 // vertical sheets in correct perspective, and folds seen edge-on come out
 // brightest, as in real aurora photographs.
-// Each curtain has its own height and colour along its length (the audio
-// wave: spectrum and note pulses, curtains.frag). Colour comes from the
-// AURORA.RAMP: a bright, slightly whitened lower edge, the ramp colour in
-// the body, and the crown further up the ramp (toward violet / pink),
-// twisted per curtain by the note's pitch class (uHueRot). A soft per-pixel
-// cap (uCap) keeps the aurora from washing out the scene.
+// Each curtain has its own height, light and colour along its length (the
+// two-layer wave aurora, curtains.frag). Curtains 0-1 are the melody layer,
+// coloured from uRampMel, 2-3 the low layer, from uRampLow: a bright,
+// slightly whitened lower edge, the ramp colour in the body and the crown
+// further along the ramp, twisted per curtain by the note's pitch class
+// (uHueRot). The two layers are accumulated apart and combined by uScreen
+// (0 = add, 1 = screen); a soft per-pixel cap (uCap) keeps the aurora from
+// washing out the scene.
 // ---------------------------------------------------------------------------
 
 #define RAMP_STOPS 6
 
 uniform float uSteps;
 uniform sampler2D tCurtains;
-uniform vec3 uRamp[RAMP_STOPS];   // linear colours
-uniform float uRampAt[RAMP_STOPS];
-uniform vec3 uHueRot;             // radians per curtain
+uniform vec3 uRampMel[RAMP_STOPS];   // linear colours (unused stops repeat the last)
+uniform float uRampMelAt[RAMP_STOPS];
+uniform vec3 uRampLow[RAMP_STOPS];
+uniform float uRampLowAt[RAMP_STOPS];
+uniform vec4 uHueRot;             // radians per curtain
+uniform vec4 uRowSheet;           // sheet thickness per curtain
 uniform float uCrest;             // ramp offset of the crown
+uniform float uScreen;            // 0 = the layers add, 1 = screen blend
 uniform float uTopScale;          // tallest possible curtain (relative height)
-uniform float uAmp;
 uniform float uCap;
 uniform float uOn;                // 0..1, the A key fades the aurora out
 varying vec2 vUv;
 
-const int CURTAINS = 3;
+const int CURTAINS = 4;
 
-vec3 ramp(float h) {
+vec3 ramp(float h, bool mel) {
   h = clamp(h, 0.0, 1.0);
-  vec3 c = uRamp[0];
+  vec3 c = mel ? uRampMel[0] : uRampLow[0];
   for (int i = 1; i < RAMP_STOPS; i++) {
-    float f = clamp((h - uRampAt[i - 1]) / max(uRampAt[i] - uRampAt[i - 1], 1e-4), 0.0, 1.0);
-    c = mix(c, uRamp[i], f * f * (3.0 - 2.0 * f));
+    float a = mel ? uRampMelAt[i - 1] : uRampLowAt[i - 1];
+    float b = mel ? uRampMelAt[i] : uRampLowAt[i];
+    float f = clamp((h - a) / max(b - a, 1e-4), 0.0, 1.0);
+    c = mix(c, mel ? uRampMel[i] : uRampLow[i], f * f * (3.0 - 2.0 * f));
   }
   return c;
 }
@@ -69,16 +76,23 @@ void main() {
   float N = uSteps;
   // per-pixel jitter of the slice offsets hides banding between slices
   float jitter = hash12(gl_FragCoord.xy + fract(t * 7.0) * 13.0);
-  float rot[3];
+  float rot[4];
   rot[0] = uHueRot.x;
   rot[1] = uHueRot.y;
   rot[2] = uHueRot.z;
+  rot[3] = uHueRot.w;
+  float sheet[4];
+  sheet[0] = uRowSheet.x;
+  sheet[1] = uRowSheet.y;
+  sheet[2] = uRowSheet.z;
+  sheet[3] = uRowSheet.w;
 
   // how far the footprint point moves between two slices: the sheet is
   // widened to at least that, so sparse slices never alias into speckle
   float slicePitch = (topAlt / N) * rd.z / rd.y;
 
-  vec3 acc = vec3(0.0);
+  vec3 accMel = vec3(0.0);
+  vec3 accLow = vec3(0.0);
   for (int i = 0; i < 48; i++) {
     float fi = float(i);
     if (fi >= N) break;
@@ -88,10 +102,11 @@ void main() {
     if (q.y > 60.0) break;
 
     float lu = clamp(q.x / 100.0 + 0.5, 0.0, 1.0);
-    float w = (0.18 + 0.12 * f) * uWidth;
-    float we = sqrt(w * w + 0.36 * slicePitch * slicePitch);
     for (int k = 0; k < CURTAINS; k++) {
-      vec4 c = texture2D(tCurtains, vec2(lu, (float(k) + 0.5) / 3.0));
+      bool mel = k < 2;
+      float w = (0.18 + 0.12 * f) * uWidth * sheet[k];
+      float we = sqrt(w * w + 0.36 * slicePitch * slicePitch);
+      vec4 c = texture2D(tCurtains, vec2(lu, (float(k) + 0.5) / 4.0));
       // height within this curtain (its own height varies along it with the music)
       float lf = f * uTopScale / max(c.b, 0.05);
       if (lf > 1.25) continue;
@@ -99,20 +114,27 @@ void main() {
       // thin sheet with a faint halo
       float glow = c.y * (w / we) * (exp(-d * d / (we * we)) + 0.04 * exp(-abs(d) * 2.5));
       // colour: whitened bright lower edge -> ramp body -> crown further up the ramp
-      vec3 body = ramp(c.a);
+      vec3 body = ramp(c.a, mel);
       vec3 col = mix(mix(body, vec3(1.0), 0.35), body, smoothstep(0.0, 0.08, lf));
-      col = mix(col, ramp(c.a + uCrest), smoothstep(0.35, 0.9, lf));
+      col = mix(col, ramp(c.a + uCrest, mel), smoothstep(0.35, 0.9, lf));
       col = hueRotate(col, rot[k]);
       // bright at the base, fading up into the soft crown, gone above the curtain's top
       float fade = (0.35 + 0.65 * smoothstep(0.0, 0.05, lf)) * exp(-lf * 2.6) * (1.0 - smoothstep(0.85, 1.25, lf));
-      acc += col * glow * fade * exp(-q.y * 0.035);
+      vec3 light = col * glow * fade * exp(-q.y * 0.035);
+      if (mel) accMel += light;
+      else accLow += light;
     }
   }
 
   float brightness = (0.8 + 0.5 * uEnergy) * (1.0 + 0.25 * uBass) * (1.0 + 0.4 * uSurge) * uBright;
   // a thin sheet is crossed by only ~1-2 slices per pixel, hence the large gain;
   // x uTopScale: the slices span the tallest possible curtain, so each curtain gets that much fewer of them
-  vec3 col = acc * brightness * (175.0 / N) * uTopScale * uOn;
+  float gain = brightness * (175.0 / N) * uTopScale * uOn;
+  accMel *= gain;
+  accLow *= gain;
+  // where the layers cross their light adds up (screen: softer where both are bright)
+  // (the screen term stays under min(mel, low), so the sum never drops below the brighter layer)
+  vec3 col = accMel + accLow - uScreen * accMel * accLow / (accMel + accLow + 1e-4);
   col *= smoothstep(0.0, 0.05, rd.y);
   // soft cap: bright pixels saturate toward uCap instead of clipping to white
   float m = max(max(col.r, col.g), col.b);

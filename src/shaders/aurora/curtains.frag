@@ -1,87 +1,84 @@
 // ---------------------------------------------------------------------------
-// Aurora curtain lookup table (4096 x 3, recomputed every frame).
+// Aurora curtain lookup table (4096 x 4, recomputed every frame).
 // Each row is one curtain; each column a position x along it (-50..50 map
 // units). Precomputing the slowly varying shape here means the volume march
 // needs one texture fetch per curtain per slice instead of several noises.
-//   r = z of the curtain's centre line (base distance + meander + folds)
-//   g = brightness along the curtain (patchiness x fine vertical rays,
-//       x the live spectrum and the note pulses passing by)
+//   r = z of the curtain's centre line (base distance + meander + folds,
+//       bent into a long arc, bowed toward the viewer where a wave passes)
+//   g = brightness along the curtain (a faint glow + the wave packets,
+//       x the vertical rays)
 //   b = the curtain's height at this point (1 = the scene's plain height)
-//   a = colour: position on the profile's AURORA.RAMP
-// The audio-wave behaviour: the spectrum (uSpec, low notes left, high right)
-// lifts and brightens the curtain like an equaliser, and every note onset
-// is a pulse (uPulse) travelling along one curtain, lifting and brightening
-// it and pulling its colour toward the note's (uPulseHue).
+//   a = colour: position on the curtain's layer ramp
+// Curtains 0-1 belong to the melody layer (0 nearest, spanning the upper
+// sky), 2-3 to the low layer (farther, lower in the sky). Every note of a
+// layer is a packet (uPacket): a soft swell travelling across the screen
+// along its curtain, which lifts, brightens and bows the curtain where it
+// passes and carries the note's colour. Packets 0-11 are the melody's,
+// 12-23 the low layer's; all are evaluated here in one pass.
 // ---------------------------------------------------------------------------
 
-#define SPEC_BANDS 48
-#define MAX_PULSES 12
+#define MAX_PACKETS 24
 
-uniform float uSpec[SPEC_BANDS];   // 0..1 per band, smoothed on the CPU
-uniform vec4 uPulse[MAX_PULSES];   // x = screen position 0..1, y = curtain, z = strength (enveloped), w = width
-uniform float uPulseHue[MAX_PULSES];
-uniform vec3 uRibbonHue;           // base ramp position of each curtain
-uniform vec3 uRibbonHeight;        // base height of each curtain
-uniform float uAmp;                // 0..1 overall wave amplitude
-uniform float uSpecHeight;
-uniform float uSpecBright;
-uniform float uPulseBright;
-uniform float uPulseLift;
-uniform float uTopScale;           // height the slices cover (tallest possible curtain)
+uniform vec4 uPacket[MAX_PACKETS];   // x = screen position 0..1, y = curtain (fractional), z = strength x envelope, w = width
+uniform vec4 uPacketShape[MAX_PACKETS]; // x = ramp position, y = lift, z = travel direction x front width (signed)
+uniform vec4 uRowHeight;   // base height per curtain
+uniform vec4 uRowHue;      // base ramp position per curtain
+uniform vec4 uRowBright;   // packet brightness per curtain
+uniform vec4 uRowBend;     // how far a packet bows the curtain toward the viewer
+uniform vec4 uRowCurve;    // the curtain's arc (map units at the screen edges)
+uniform vec4 uRowStria;    // vertical ray frequency
+uniform float uGlow;       // faint light along every curtain (x amplitude)
+uniform float uTopScale;   // height the slices cover (tallest possible curtain)
 varying vec2 vUv;
 
-float spectrum(float u) {
-  float b = clamp(u, 0.0, 1.0) * float(SPEC_BANDS - 1);
-  int i = int(floor(b));
-  float f = b - float(i);
-  // smooth between neighbouring bands, so the curtain never steps
-  return mix(uSpec[i], uSpec[min(i + 1, SPEC_BANDS - 1)], f * f * (3.0 - 2.0 * f));
+const vec4 ROW_Z = vec4(7.5, 11.5, 16.0, 22.0);
+
+float pick(vec4 v, float k) {
+  return k < 0.5 ? v.x : k < 1.5 ? v.y : k < 2.5 ? v.z : v.w;
 }
 
 void main() {
   float x = (vUv.x - 0.5) * 100.0;
-  float fk = floor(vUv.y * 3.0);
+  float fk = floor(vUv.y * 4.0);
   float t = uTime;
 
-  float base = 8.0 + 7.5 * fk;
-  float fold = 0.32 + 0.35 * uMid; // mid: fold frequency
-  float meander = 4.0 * (vnoise(vec2(x * 0.035 + fk * 9.1, t * 0.018 + fk)) - 0.5) * 2.0;
-  float folds = ((1.8 - 0.3 * fk) * sin(x * fold + t * (0.5 + 0.1 * fk) + fk * 2.3)
-              + 0.5 * sin(x * fold * 2.3 - t * 0.7 + fk)) * uFold;
-
-  // coverage: more of each curtain lights up as the music grows
-  float patchy = smoothstep(0.55 - 0.4 * uCover, 0.95 - 0.3 * uCover, vnoise(vec2(x * 0.09 + t * 0.03, fk * 5.0)));
-  // fine vertical rays; treble makes them crisper and denser
-  float rays = vnoise(vec2(x * (2.6 + 2.5 * uTreble) - t * 0.25, fk * 3.0 + t * 0.05));
-  rays = mix(1.0, 0.25 + 1.1 * rays * rays, 0.55 + 0.35 * uTreble);
-
+  float base = pick(ROW_Z, fk);
   // where this point of the curtain appears across the screen (0 = left edge)
   float su = 0.5 + x * FOCAL / (base * uAspect);
+  float meander = 4.0 * (vnoise(vec2(x * 0.035 + fk * 9.1, t * 0.018 + fk)) - 0.5) * 2.0;
+  float fold = 0.32 + 0.35 * uMid; // mid: fold frequency
+  float folds = ((1.6 - 0.25 * fk) * sin(x * fold + t * (0.5 + 0.1 * fk) + fk * 2.3)
+              + 0.5 * sin(x * fold * 2.3 - t * 0.7 + fk)) * uFold;
+  float arc = pick(uRowCurve, fk) * 4.0 * (su - 0.5) * (su - 0.5);
 
-  // the equaliser: this point's spectrum band lifts and brightens the curtain
-  float spec = spectrum(su) * uAmp;
-  float height = (fk < 0.5 ? uRibbonHeight.x : fk < 1.5 ? uRibbonHeight.y : uRibbonHeight.z) * (1.0 + uSpecHeight * spec);
-  float light = 1.0 + uSpecBright * spec;
-  float hue = fk < 0.5 ? uRibbonHue.x : fk < 1.5 ? uRibbonHue.y : uRibbonHue.z;
-
-  // note pulses travelling along this curtain
-  float pulseW = 0.0;
-  float pulseHue = 0.0;
-  for (int i = 0; i < MAX_PULSES; i++) {
-    vec4 p = uPulse[i];
-    if (p.z <= 0.0 || abs(p.y - fk) > 0.5) continue;
-    float d = (su - p.x) / p.w;
-    float g = p.z * exp(-d * d);
-    pulseW += g;
-    pulseHue += g * uPulseHue[i];
+  // the wave packets riding this curtain
+  float w = 0.0;
+  float hue = 0.0;
+  float lift = 0.0;
+  for (int i = 0; i < MAX_PACKETS; i++) {
+    vec4 p = uPacket[i];
+    if (p.z <= 0.0) continue;
+    float wk = 1.0 - abs(p.y - fk);
+    if (wk <= 0.0) continue;
+    vec4 q = uPacketShape[i];
+    float d = su - p.x;
+    // the leading edge (in the travel direction) is crisper
+    float wd = p.w * (d * q.z > 0.0 ? abs(q.z) : 1.0);
+    float g = p.z * wk * exp(-d * d / (wd * wd));
+    w += g;
+    hue += g * q.x;
+    lift += g * q.y;
   }
-  height += uPulseLift * pulseW;
-  light += uPulseBright * pulseW;
-  // the pulse carries the note's colour: the curtain leans toward it where it passes
-  float pull = pulseW / (pulseW + 0.35);
-  hue = mix(hue, pulseHue / max(pulseW, 1e-4), pull);
-  // a passing pulse also lights up an otherwise dark stretch a little
-  patchy = max(patchy, clamp(pulseW, 0.0, 1.0) * 0.6);
 
-  gl_FragColor = vec4(base + meander + folds, (0.04 + 0.96 * patchy) * rays * (1.0 - 0.3 * fk) * light, min(height, uTopScale), hue);
+  // a faint, patchy glow keeps every curtain alive between the waves
+  float patchy = smoothstep(0.35, 0.9, vnoise(vec2(x * 0.06 + t * 0.03, fk * 5.0)));
+  float light = uGlow * (0.25 + 0.75 * patchy) + pick(uRowBright, fk) * w;
+  // vertical rays: fine for the melody, broad and gentle for the low layer
+  float rays = vnoise(vec2(x * pick(uRowStria, fk) - t * 0.25, fk * 3.0 + t * 0.05));
+  rays = mix(1.0, 0.25 + 1.1 * rays * rays, 0.55 + 0.25 * uTreble);
+  float col = mix(pick(uRowHue, fk), hue / max(w, 1e-4), w / (w + 0.12));
+  float z = base + meander + folds + arc - pick(uRowBend, fk) * min(w, 1.5);
+  float height = pick(uRowHeight, fk) + lift;
+
+  gl_FragColor = vec4(z, light * rays * (1.0 - 0.12 * fk), min(height, uTopScale), col);
 }
