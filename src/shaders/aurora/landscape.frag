@@ -31,6 +31,17 @@
 // slow ripples, soft rings from note onsets (uRing), a glow along the
 // shoreline and a coloured glow where the reflected aurora is brightest.
 // The longship (B) is hidden in this look.
+// More alive (PROFILE.ALIVE, MIST): the stars wheel slowly around a pole
+// above the frame on the sky clock (each star box-filtered over its pixel,
+// so a moving star keeps its brightness); the cloud wisps drift left ->
+// right and their thin edges glow where a ribbon passes behind them; banks
+// of mist and low cloud roll along the horizon in 4 depth layers (behind
+// every range, in the valleys behind the main range, over the mountains'
+// feet, a thin sheet low over the water), drifting at their own speeds,
+// their shapes simplex fbm advected through a slowly changing warp. The
+// aurora lights their upper parts (its average colour, and the ribbon right
+// above them); their feet stay dark teal. The water mirrors them as soft
+// glowing smears.
 // A filmic grade (lifted teal blacks, gentle saturation, subtle vignette)
 // ends the pass; the bloom, ACES and the dither follow.
 // ---------------------------------------------------------------------------
@@ -90,11 +101,23 @@ uniform vec3 uSail;
 uniform vec3 uShipLight;
 uniform vec4 uGrade;         // x = saturation, y = warm saturation, z = vignette
 uniform vec3 uLift;
+uniform float uCloudGlow;    // the wisps' edges glow with the aurora behind them
+uniform vec3 uStarRot;       // x = the star field's turn (radians), yz = its pole (screen x, height)
+uniform vec4 uMist;          // x = on, y = cover threshold, z = softness, w = billow (warp strength)
+uniform vec4 uMistClock;     // x = roll phase (sky clock × ROLL), y = glow (music), z = overhead glow, w = aurora tint
+uniform vec4 uMistLayer[4];  // far -> near: x = foot, y = top (screen heights above the water line), z = opacity, w = drift (screen heights)
+uniform vec4 uMistShape[4];  // x = scale (per screen height), y = stretch, z = octaves, w (layer 0) = in the water
+uniform vec3 uMistBase;      // dark teal
+uniform vec3 uMistStar;      // faint starlight on every bank
 varying vec2 vUv;
 
 // the stars: the brightest `shown` share of the field (fading in from the brightest down)
 vec3 starField(vec2 uv, float shown) {
-  vec2 px = uv * uResolution;
+  // the field wheels slowly around a pole above the frame
+  vec2 pole = uStarRot.yz * uResolution;
+  float rc = cos(uStarRot.x);
+  float rs = sin(uStarRot.x);
+  vec2 px = pole + mat2(rc, rs, -rs, rc) * (uv * uResolution - pole);
   float scale = uResolution.y / 260.0; // cell size in pixels
   vec3 col = vec3(0.0);
   for (int layer = 0; layer < 2; layer++) {
@@ -106,17 +129,22 @@ vec3 starField(vec2 uv, float shown) {
     float thresh = 1.0 - (layer == 0 ? 0.022 : 0.012) * uStarLook.x;
     if (h.z > thresh) {
       vec2 o = (h.xy - 0.5) * s * 0.7;
-      float d = length(f - o);
       float b = (h.z - thresh) / (1.0 - thresh);
       // the faint layer only shows in the second half of the night's stars
       float sh = layer == 0 ? shown : clamp(2.0 * shown - 1.0, 0.0, 1.0);
       float vis = smoothstep(1.0 - sh - 0.1, 1.0 - sh + 0.02, b);
       b = b * b * (layer == 0 ? 1.1 : 0.45);
       // twinkle: gentle always, sharper with treble
-      float tw = 0.7 + 0.3 * sin(uTime * (1.5 + h.x * 4.0) + h.y * 40.0);
-      tw *= 1.0 + uTreble * 0.9 * sin(uTime * 17.0 + h.x * 70.0);
+      // (on real time: the music clock runs up to 3x and would turn the twinkle into flicker)
+      float tw = 0.7 + 0.3 * sin(uClock * (1.5 + h.x * 4.0) + h.y * 40.0);
+      tw *= 1.0 + uTreble * 0.9 * sin(uClock * 17.0 + h.x * 70.0);
       vec3 tint = mix(vec3(0.75, 0.85, 1.0), vec3(1.0, 0.92, 0.8), h.x);
-      col += tint * b * tw * vis * exp(-d * d / ((0.55 + b) * uStarLook.y * uStarLook.y));
+      // box-filtered over the pixel (2x2 samples): a star drifting across pixels keeps its light
+      float k = (0.55 + b) * uStarLook.y * uStarLook.y;
+      vec2 q = f - o;
+      float g = exp(-dot(q + vec2(-0.25, -0.25), q + vec2(-0.25, -0.25)) / k) + exp(-dot(q + vec2(0.25, -0.25), q + vec2(0.25, -0.25)) / k)
+              + exp(-dot(q + vec2(-0.25, 0.25), q + vec2(-0.25, 0.25)) / k) + exp(-dot(q + vec2(0.25, 0.25), q + vec2(0.25, 0.25)) / k);
+      col += tint * b * tw * vis * 0.25 * g;
     }
   }
   return col;
@@ -214,6 +242,51 @@ vec2 clouds(vec2 p) {
   float rim = cover * (1.0 - smoothstep(uCloud.z - 0.04, uCloud.z + uCloud.w * 0.6, toward)) * (1.0 - smoothstep(0.3, 1.0, cover) * 0.6);
   rim *= exp(-dist * 1.6) * 2.2; // strongest near the light, low over the horizon
   return vec2(cover, rim);
+}
+
+// ------------------------------------------------------------- mist and low clouds
+
+// Mist layer i at p (screen heights: x from the centre, y above the water line):
+// x = cover 0..1, y = height within the bank 0..1 (0 = its foot).
+vec2 mistLayer(int i, vec2 p) {
+  vec4 L = uMistLayer[i];
+  vec4 S = uMistShape[i];
+  float h = (p.y - L.x) / (L.y - L.x);
+  if (h < -0.6 || h > 1.15) return vec2(0.0);
+  float fi = float(i);
+  // drifting left -> right (parallax: each layer at its own speed), wide and low
+  vec2 q = vec2((p.x - L.w) * S.x, p.y * S.x * S.y) + vec2(fi * 17.3, fi * 5.1);
+  // rolling: a slowly changing warp stretches, merges and dissolves the banks (the field is
+  // advected, never re-seeded: no popping, no boiling)
+  float c = uMistClock.x + fi * 1.7;
+  vec2 w = vec2(snoise(vec3(q * 0.35, c)), snoise(vec3(q * 0.35 + 9.2, c * 1.1)));
+  q += uMist.w * w * vec2(1.6, 0.5);
+  float n = 0.5 + 0.6 * fbm(q, int(S.z));
+  // thick at the foot, billowing tops, thinning out below the foot
+  float hc = clamp(h, 0.0, 1.0);
+  float cover = smoothstep(uMist.y, uMist.y + uMist.z, n - 0.85 * hc) * smoothstep(-0.6, 0.0, h);
+  return vec2(cover, hc);
+}
+
+// The aurora right above screen x (what lights the mist from overhead).
+vec3 mistOverhead(float x) {
+  return 0.5 * (texture2D(tAurora, vec2(x, HORIZON + 0.14)).rgb + texture2D(tAurora, vec2(x, HORIZON + 0.3)).rgb) * uNightAurora.x;
+}
+
+// Mist over `col` at p (as in mistLayer), in front of the terrain material `mat`
+// (0 sky, 0.33 far range, 0.66 main range, 1 near / water): lit from above, dark feet.
+vec3 mist(vec3 col, vec2 p, float mat, vec3 amb, vec3 over) {
+  if (uMist.x <= 0.0) return col;
+  vec3 lit = uMistBase + uMistStar + (amb * uMistClock.w + over * uMistClock.z) * uMistClock.y;
+  for (int i = 0; i < 4; i++) {
+    if (i == 0 && mat > 0.16) continue; // behind every range
+    if (i == 1 && mat > 0.5) continue; // in the valleys, behind the main range
+    vec2 m = mistLayer(i, p);
+    float a = m.x * uMistLayer[i].z * uMist.x;
+    if (a <= 0.0) continue;
+    col = mix(col, mix(uMistBase * 0.55, lit, 0.2 + 0.8 * smoothstep(0.0, 1.0, m.y)), a);
+  }
+  return col;
 }
 
 // ------------------------------------------------------------- the longship
@@ -380,9 +453,13 @@ vec3 above(vec2 uv, vec3 amb, float starGain) {
   vec2 cl = clouds(cp);
   vec3 body = uCloudBody + amb * uCloud3.x;
   col = mix(col, body, cl.x * uCloud3.w);
+  // their thin edges glow where a ribbon passes behind them
+  col += aurora * uCloudGlow * cl.x * (1.0 - cl.x) * 4.0 * uCloud3.w;
   col += mix(uCloudRim0, uCloudRim1, smoothstep(0.2, 1.0, cl.y)) * cl.y * uCloud3.y;
 
   if (terrain.b > 0.16) col = mountain(terrain, uv, amb, haze);
+  // mist and low clouds rolling along the horizon, behind or in front of each range
+  if (y < 0.13) col = mist(col, cp, terrain.b, amb, mistOverhead(uv.x));
   // a faint glow where the far shore meets the water
   col += amb * uSkyLook.w * exp(-y * 90.0) * step(0.0, y);
   return col;
@@ -464,7 +541,11 @@ void main() {
     refl /= 6.0;
     // the stars, small and a little dimmer (only where the sky shows, not the mountains)
     vec2 sv = vec2(ruv.x, max(ruv.y, HORIZON + 0.0005));
-    if (texture2D(tTerrain, sv).b < 0.16) refl += starField(sv, uStars.y) * uStars.x * uReflect2.w;
+    float svMat = texture2D(tTerrain, sv).b;
+    if (svMat < 0.16) refl += starField(sv, uStars.y) * uStars.x * uReflect2.w;
+    // the mist in the water: soft glowing smears (evaluated once, at the mirrored point)
+    vec3 over = uMist.x > 0.0 && depth < 0.6 ? mistOverhead(uv.x) : vec3(0.0);
+    if (uMist.x > 0.0 && sv.y - HORIZON < 0.13) refl = mix(refl, mist(refl, vec2((sv.x - 0.5) * uAspect, sv.y - HORIZON), svMat, amb, over), uMistShape[0].w);
     // Fresnel: strongest at the far water near the horizon, weaker in the foreground
     float fres = mix(uReflect.x, uReflect2.x, pow(depth, 1.0 / uReflect2.y));
     vec3 water = mix(uWaterTop, uWaterBottom, depth);
@@ -488,6 +569,8 @@ void main() {
     }
     // thin bright ripple glints catch the aurora
     col += amb * 0.06 * smoothstep(0.6, 1.0, n0) * (1.0 - depth) * uReflect.x;
+    // a thin sheet of mist low over the water (and the near bank's foot), in front of the reflection
+    if (depth < 0.6) col = mist(col, vec2((uv.x - 0.5) * uAspect, uv.y - HORIZON), 1.0, amb, over);
 
     // --- foreground shoreline rocks with a green aurora rim light (off in the restyle)
     float x = (uv.x - 0.5) * uAspect;

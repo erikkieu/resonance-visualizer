@@ -688,6 +688,17 @@ input[type='range']::-moz-range-thumb {
   display: none;
 }
 
+/* a scene's live sliders: the only interactive part of the overlay */
+.debug-control {
+  pointer-events: auto;
+}
+
+.debug-control input {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
 .debug-title {
   display: flex;
   justify-content: space-between;

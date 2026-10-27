@@ -13,6 +13,10 @@ import { createTimeline } from './timeline.js';
  * when the rest of the UI hides (H / inactivity).
  * With a piece's analysis loaded it also shows the score timeline
  * (timeline.js) and the score follower's values.
+ * A scene can also offer live sliders through `debugControls`: [{ label,
+ * min, max, step, get(), set(v) }], built once per scene (the rows above are
+ * rewritten ~15 times a second, a slider must survive that) and kept in step
+ * with get() while not being dragged (keys may change the value too).
  */
 export function createDebugOverlay({ audio, manager }) {
   const el = document.createElement('div');
@@ -27,18 +31,38 @@ export function createDebugOverlay({ audio, manager }) {
     <div class="debug-chroma" data-k="chroma"></div>
     <div class="debug-scene" data-k="perf"></div>
     <div class="debug-scene" data-k="scene"></div>
+    <div class="debug-controls" data-k="controls"></div>
     <div class="debug-sub" data-k="bands"></div>
   `;
   document.body.appendChild(el);
   const timeline = createTimeline({ audio });
   const q = (k) => el.querySelector(`[data-k="${k}"]`);
-  const nodes = Object.fromEntries(['height', 'heightText', 'pitchInfo', 'loud', 'loudText', 'note', 'strength', 'chroma', 'perf', 'scene', 'bands'].map((k) => [k, q(k)]));
+  const nodes = Object.fromEntries(['height', 'heightText', 'pitchInfo', 'loud', 'loudText', 'note', 'strength', 'chroma', 'perf', 'scene', 'controls', 'bands'].map((k) => [k, q(k)]));
   const bars = NOTE_NAMES.map((name) => {
     const col = document.createElement('span');
     col.innerHTML = `<i></i><em>${name}</em>`;
     nodes.chroma.appendChild(col);
     return col;
   });
+
+  // the scene's live sliders (scene.debugControls), rebuilt when the scene changes
+  let controlScene = null;
+  let controls = [];
+  function buildControls(scene) {
+    controlScene = scene;
+    nodes.controls.innerHTML = '';
+    controls = (scene?.debugControls ?? []).map((c) => {
+      const row = document.createElement('label');
+      row.className = 'debug-row debug-control';
+      row.innerHTML = `<b>${c.label}</b><input type="range" min="${c.min}" max="${c.max}" step="${c.step}"><span></span>`;
+      const input = row.querySelector('input');
+      const out = row.querySelector('span');
+      input.value = c.get();
+      input.addEventListener('input', () => c.set(Number(input.value)));
+      nodes.controls.appendChild(row);
+      return { c, input, out };
+    });
+  }
 
   let last = 0;
   const fmt = (v, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : '-');
@@ -91,6 +115,11 @@ export function createDebugOverlay({ audio, manager }) {
     const scene = manager.current?.scene;
     const extra = scene?.debug ?? { 'speed ×': fmt(scene?.speed ?? 0) };
     nodes.scene.innerHTML = Object.entries(extra).map(row).join('');
+    if (scene !== controlScene) buildControls(scene);
+    for (const { c, input, out } of controls) {
+      if (document.activeElement !== input) input.value = c.get();
+      out.textContent = fmt(c.get());
+    }
     nodes.bands.textContent = `presence ${fmt(a.presence)} · bass ${fmt(a.bass)} · mid ${fmt(a.mid)} · treble ${fmt(a.treble)}`;
   }
 

@@ -195,6 +195,102 @@ export const PROFILE = {
     },
   },
 
+  // ------------------------------------------------------- alive: a strong reaction to the music, more movement
+  // (Scene2Aurora._updateAlive). Loudness becomes an intensity x 0..1; every [quiet, loud] RANGE
+  // maps it to a multiplier. RANGEs are given at REACTIVITY 1: REACTIVITY widens each around its
+  // geometric middle m (m × (v / m)^REACTIVITY: 1.5 turns a 6× range into 15×) and scales the kicks.
+  ALIVE: {
+    REACTIVITY: 1.5, // live: slider in the debug overlay (D), keys [ and ] (0.5 .. 3)
+    // x: the score's anticipating drive (it rises up to 1.5 s before a crescendo lands), normalised to
+    // this piece (QUIET / LOUD = percentiles of its level: the quieter half of the piece sits near 0),
+    // a soft knee at the bottom, then ^CURVE so loud parts blaze and quiet ones calm right down;
+    // fast attack, slow release (s), a small dead-band. LIVE: [quiet, loud] drive without a score.
+    LEVEL: { QUIET: 0.5, LOUD: 0.97, KNEE: 0.12, CURVE: 1.6, ATTACK: 0.1, RELEASE: 0.9, DEADBAND: 0.01, LIVE: [0.3, 0.9] },
+    RANGE: {
+      BRIGHT: [0.3, 0.5], // × the aurora's light (quiet stays visible: calm, never empty)
+      HEIGHT: [0.78, 1.1], // × ray length (the ribbons' height)
+      WIDTH: [0.85, 1.15], // × the curtains' spread across the sky
+      SATURATION: [0.9, 1.06], // × the palette's saturation
+      HUE: [0.55, 1.1], // × the melody's hue range around the palette's centre
+      MOVE: [0.6, 1.4], // × sway, billow, loop and fold amplitudes
+      WAVE: [0.65, 1.45], // × the travelling waves' speed, on top of the clock
+    },
+    // The clock (every motion: curtains, rays, waves, sky, stars, mist): time += dt × speed, with
+    // speed = RANGE at xs (x through ATTACK / RELEASE) × the section's MOVE × (1 + MOMENTUM × the
+    // rise of xs per s, smoothed over MOMENTUM_TIME), above LIMIT[0] and easing softly toward LIMIT[1]. With a score it is computed
+    // for the whole piece and integrated in advance, so the clocks follow the playhead (a seek lands
+    // on the same sky); live it is integrated frame by frame. IDLE: the speed while paused.
+    SPEED: { RANGE: [0.62, 1.9], MOMENTUM: 1.2, MOMENTUM_TIME: 2, ATTACK: 0.8, RELEASE: 2.5, LIMIT: [0.3, 3.4], IDLE: 0.35 },
+    // every melody note: a quick brightness kick (fast attack, soft decay; s) peaking on the note,
+    // and a bright pulse at the head of its wave as it sets off along the ribbon
+    KICK: { GAIN: 0.22, ATTACK: 0.045, DECAY: 0.6, MIN_STRENGTH: 0.08, MIN_GAP: 0.09, MAX: 0.8, PULSE: 0.6, PULSE_TIME: 0.35 },
+    // every strong low / chord note: the big lower ribbons swell (brighter, longer rays) and rise
+    SWELL: { GAIN: 0.5, GROW: 0.2, RISE: 0.04, ATTACK: 0.12, DECAY: 1.3, MIN_STRENGTH: 0.3, MIN_GAP: 0.25 },
+    // accents (the strongest SHARE of the piece's onsets): a global glow lift and a ripple on the water
+    ACCENT: { SHARE: 0.2, GLOW: 0.4, ATTACK: 0.06, DECAY: 1.0, MIN_GAP: 0.3, LIVE_STRENGTH: 0.55 },
+    // the melody's pitch shifts the ribbons' hue (ramp units at the extremes; the low ribbons half), glide (s)
+    HUE_FOLLOW: { AMOUNT: 0.2, TIME: 0.35 },
+    // each section's energy state (by its role in the analysis), cross-faded over BLEND s and into the
+    // next section ahead of the change: movement, the most ribbons shown, a brightness ceiling, colour range
+    SECTIONS: {
+      hush: { MOVE: 0.55, RIBBONS: 3, BRIGHT: 0.6, COLOUR: 0.6 },
+      release: { MOVE: 0.75, RIBBONS: 3.5, BRIGHT: 0.8, COLOUR: 0.8 },
+      build: { MOVE: 1.0, RIBBONS: 5, BRIGHT: 1.0, COLOUR: 0.95 },
+      swell: { MOVE: 1.1, RIBBONS: 5, BRIGHT: 1.1, COLOUR: 1.0 },
+      climax: { MOVE: 1.35, RIBBONS: 6, BRIGHT: 1.25, COLOUR: 1.2 },
+      fade: { MOVE: 0.6, RIBBONS: 3, BRIGHT: 0.65, COLOUR: 0.7 },
+    },
+    SECTION_BLEND: 3, // s
+    // movement shapes (amplitudes × RANGE.MOVE; rates per clock second)
+    MOTION: {
+      SWAY: 0.09, // radians: each ribbon sways around the vanishing point
+      SWAY_RATE: 0.07,
+      ROTATE: 0.07, // radians: the whole curtain system turns slowly to and fro around the vanishing point
+      ROTATE_RATE: 0.013,
+      BILLOW: 0.8, // × each ribbon's billow (its folds)
+      CURL: 1.2, // × the loop's sway (it forms and unravels; at most ± CURL_MAX of its twist)
+      CURL_MAX: 0.45,
+      CURL_RATE: 0.035,
+      FOLD: 1.2, // × the curtains' ripples
+      DRIFT: 2.5, // × each ribbon's SHIFT: the ribbons travel along the sky and cross
+      DRIFT_PERIOD: 70, // clock s, there and back
+      FAN: [0.0, 0.08], // the rays fan open with x (share of the view angle) ...
+      KICK_FAN: 0.05, // ... and with each kick
+    },
+    STARS: { ROTATION: 0.0016, POLE: [0.62, 1.75] }, // radians per sky-clock second, around this point (screen x, height)
+  },
+
+  // ------------------------------------------------------- mist and low clouds along the horizon (landscape.frag)
+  // Banks of mist hugging the horizon and the valleys, in 4 depth layers, drifting left -> right at
+  // their own speeds (parallax: the nearer, the faster) on the sky clock, so they rush at the climax
+  // and settle in the quiet. Their shapes roll, stretch, merge and dissolve: low-frequency simplex fbm
+  // advected through a slowly changing domain warp (no popping, no boiling). The aurora above lights
+  // their upper parts in its own colours, brightest under a ribbon; their feet stay dark teal.
+  MIST: {
+    ON: true, // M
+    // BASE / TOP: the bank's foot and its billowing top (screen heights above the water line; negative =
+    // over the water), OPACITY, SPEED (screen heights per sky-clock second), SCALE (noise per screen
+    // height across), STRETCH (wider than tall)
+    LAYERS: [
+      { NAME: 'far', BASE: 0.025, TOP: 0.11, OPACITY: 0.7, SPEED: 0.008, SCALE: 2.0, STRETCH: 3.5 }, // behind every range
+      { NAME: 'valleys', BASE: 0.004, TOP: 0.075, OPACITY: 0.75, SPEED: 0.014, SCALE: 2.6, STRETCH: 4 }, // in front of the far hills, behind the main range
+      { NAME: 'near', BASE: -0.004, TOP: 0.05, OPACITY: 0.65, SPEED: 0.022, SCALE: 3.2, STRETCH: 4.5 }, // over the foot of the mountains
+      { NAME: 'water', BASE: -0.035, TOP: 0.012, OPACITY: 0.5, SPEED: 0.034, SCALE: 4.2, STRETCH: 6 }, // a thin sheet low over the water
+    ],
+    COVER: 0.05, // density threshold (higher = thinner, more broken banks)
+    SOFT: 0.4,
+    OCTAVES: 3, // (2 at lower quality levels)
+    ROLL: 0.05, // how fast the shapes evolve (warp per sky-clock second) ...
+    WARP: 0.5, // ... and how far they roll and stretch; + MID × mid energy
+    BASE_COLOR: '#1f3537', // dark teal, as seen
+    STARLIGHT: '#0e1a20', // faint cool light from the sky on every bank
+    TINT: 0.5, // the aurora's average light colours the upper parts ...
+    OVERHEAD: 0.3, // ... and the ribbon directly above makes them glow
+    // glow × (1 + BASS × bass + AURORA × the aurora's brightness + CLIMAX × climax + ACCENT × accent glow); MID: billow
+    MUSIC: { BASS: 0.35, AURORA: 0.1, CLIMAX: 0.15, ACCENT: 0.35, MID: 0.3 },
+    REFLECT: 0.75, // the mist in the water: soft glowing smears
+  },
+
   // ------------------------------------------------------- the look (reference restyle 2)
   // public/textures/aurora-reference-2.jpg (local, not committed): a long-exposure
   // photograph looking up into a big green aurora overhead, above a calm fjord.
@@ -229,14 +325,14 @@ export const PROFILE = {
     // waves, light and colour: rows 0-1 = the melody layer, high in the sky; 2-3 = the low
     // chords, down toward the mountains) with its own lower edge (distance from the VP), tilt,
     // level (FLAT: 0 = an arc overhead, 1 = level, far), ray LENGTH, soft lower EDGE_SOFT,
-    // brightness, colour offset on its ramp (HUE), drift along the sky (SHIFT, lookup units / s:
-    // the thin foreground ribbons slide past the others), billow (amplitude, rate) and the
+    // brightness, colour offset on its ramp (HUE), travel along the sky (SHIFT: peak speed, screen
+    // widths per clock s, × ALIVE.MOTION.DRIFT, there and back; the thin foreground ribbons slide past the others), billow (amplitude, rate) and the
     // aurora amplitude from which it shows (SHOW): 3 when quiet, all 6 when loud.
     RIBBONS: [
-      { NAME: 'main', ROW: 2, EDGE: 0.7, TILT: 0.04, FLAT: 0.8, LENGTH: 0.45, EDGE_SOFT: 0.06, BRIGHT: 1.0, HUE: -0.18, SHIFT: 0, BILLOW: 0.11, RATE: 0.012, SHOW: 0 },
-      { NAME: 'overhead', ROW: 0, EDGE: 0.46, TILT: 0.1, FLAT: 0.15, LENGTH: 0.5, EDGE_SOFT: 0.06, BRIGHT: 1.0, HUE: -0.12, SHIFT: 0, BILLOW: 0.1, RATE: 0.01, SHOW: 0 },
-      { NAME: 'violet', ROW: 1, EDGE: 0.6, TILT: -0.06, FLAT: 0.45, LENGTH: 0.4, EDGE_SOFT: 0.06, BRIGHT: 1.15, HUE: 0.42, SHIFT: 0, BILLOW: 0.13, RATE: -0.014, SHOW: 0 },
-      { NAME: 'far blue', ROW: 3, EDGE: 0.83, TILT: 0.02, FLAT: 1.0, LENGTH: 0.26, EDGE_SOFT: 0.07, BRIGHT: 1.0, HUE: 0.45, SHIFT: 0, BILLOW: 0.08, RATE: 0.009, SHOW: 0.25 },
+      { NAME: 'main', ROW: 2, EDGE: 0.7, TILT: 0.04, FLAT: 0.8, LENGTH: 0.45, EDGE_SOFT: 0.06, BRIGHT: 1.0, HUE: -0.18, SHIFT: 0.004, BILLOW: 0.11, RATE: 0.012, SHOW: 0 },
+      { NAME: 'overhead', ROW: 0, EDGE: 0.46, TILT: 0.1, FLAT: 0.15, LENGTH: 0.5, EDGE_SOFT: 0.06, BRIGHT: 1.0, HUE: -0.12, SHIFT: -0.006, BILLOW: 0.1, RATE: 0.01, SHOW: 0 },
+      { NAME: 'violet', ROW: 1, EDGE: 0.6, TILT: -0.06, FLAT: 0.45, LENGTH: 0.4, EDGE_SOFT: 0.06, BRIGHT: 1.15, HUE: 0.42, SHIFT: 0.008, BILLOW: 0.13, RATE: -0.014, SHOW: 0 },
+      { NAME: 'far blue', ROW: 3, EDGE: 0.83, TILT: 0.02, FLAT: 1.0, LENGTH: 0.26, EDGE_SOFT: 0.07, BRIGHT: 1.0, HUE: 0.45, SHIFT: -0.003, BILLOW: 0.08, RATE: 0.009, SHOW: 0.25 },
       { NAME: 'thin cyan', ROW: 0, EDGE: 0.36, TILT: 0.05, FLAT: 0.1, LENGTH: 0.16, EDGE_SOFT: 0.035, BRIGHT: 0.8, HUE: 0.02, SHIFT: 0.018, BILLOW: 0.16, RATE: 0.03, SHOW: 0.35 },
       { NAME: 'thin magenta', ROW: 1, EDGE: 0.54, TILT: -0.1, FLAT: 0.3, LENGTH: 0.14, EDGE_SOFT: 0.035, BRIGHT: 0.95, HUE: 0.62, SHIFT: -0.014, BILLOW: 0.15, RATE: -0.026, SHOW: 0.5 },
     ],
@@ -298,33 +394,37 @@ export const PROFILE = {
     },
     STARS: { DENSITY: 0.38, SIZE: 0.5, BEHIND_AURORA: 6 }, // share of the old field (~500 visible), size, dimming behind the aurora
     CLOUDS: {
-      // very subtle: thin, dark, wispy, cool, low opacity (C)
+      // thin, dark, cool wisps higher in the sky (C), drifting left -> right with the mist on the sky
+      // clock, partly silhouetting the aurora; their edges glow where a ribbon passes behind them
       ON: true,
-      OPACITY: 0.28,
+      OPACITY: 0.42,
+      EDGE_GLOW: 0.9, // × the aurora behind, at the wisps' thin edges
       SCALE: 2.2, // fbm frequency (per screen height)
       STRETCH: 3.2, // stretched sideways into wisps
       OCTAVES: 4,
       COVER: 0.52, // density threshold: higher = fewer clouds
       SOFT: 0.25, // edge softness
       SIDES: [-0.25, 0.45], // inner edges of the left / right banks (x in screen heights from the centre)
-      BAND: [0.03, 0.45], // lowest / highest cloud (screen heights above the mountains' foot)
+      BAND: [0.08, 0.55], // lowest / highest cloud (screen heights above the mountains' foot)
       BODY: '#16232a', // dark blue-grey ...
       AURORA_TINT: 0.12, // ... with a faint green tint from the aurora
       RIM: ['#e8946a', '#f2b58a'], // (warm rims: off)
       RIM_STRENGTH: 0,
       RIM_WIDTH: 0.06,
       LIGHT: [-0.08, -0.06],
-      DRIFT: [0.004, 0.007], // drift speeds of the two banks (screen heights per second)
+      DRIFT: [0.01, 0.014], // drift speeds of the two banks, both left -> right (screen heights per sky-clock second)
       BASS_GAIN: 0,
       DAWN_GAIN: 0,
     },
     MOUNTAINS: {
-      ROCK: '#2a4637', // dark blue-green rock
-      SNOW: '#3a5848', // the snow streaks, unlit
-      RIM: 1.4, // the aurora lights the ridges green (× its average light), brightest at the crest
-      SKY_LIGHT: 0.22, // the aurora lights the snow
+      // dark silhouettes against the aurora (user, 2026-10-27; restyle 2 had lit blue-green rock #2a4637
+      // and snow #3a5848): near-black blue-green, the snow streaks only a hint, a thin rim on the ridges
+      ROCK: '#0b1311', // near-black blue-green rock
+      SNOW: '#121c19', // the snow streaks, barely lighter
+      RIM: 0.6, // the aurora catches the ridge lines (× its average light), only at the crest
+      SKY_LIGHT: 0.04, // the aurora lights the snow (a little)
       LIT: { AMP: [0.1, 0.45], LIGHT: [0.4, 1] }, // ROCK / SNOW as given from aurora amplitude AMP[1] up, × LIGHT[0] when faint (dark silhouettes)
-      HAZE: [0.55, 0.28, 0.1], // haze over the [far, middle, near] layers
+      HAZE: [0.3, 0.1, 0], // haze over the [far, middle, near] layers: the far hills a shade lighter, for depth
     },
     // A dark, calm, glassy mirror of the whole sky (R toggles the reflection)
     WATER: {
@@ -342,8 +442,8 @@ export const PROFILE = {
       STARS: 0.55, // reflected stars (× the sky's)
       GLOW: 0.35, // coloured glow on the water near the horizon (× the reflected aurora there)
       SHORE: 0.5, // aurora glow along the shoreline (the mountains' reflection)
-      // note onsets send soft rings across the water (strong notes only, a few at a time)
-      ONSET_RINGS: { MAX: 4, MIN_GAP: 0.7, MIN_STRENGTH: 0.55, SPEED: 2.5, WIDTH: 0.7, LIFE: 6, AMP: 0.5 }, // s, note strength, water units / s, units, s, × slope
+      // accents (ALIVE.ACCENT: the strongest onsets) send soft rings across the water, a few at a time
+      ONSET_RINGS: { MAX: 4, MIN_GAP: 0.45, SPEED: 2.5, WIDTH: 0.7, LIFE: 6, AMP: 0.55 }, // s, water units / s, units, s, × slope
       RINGS: 0.3, // rings spreading from the ship (when shown)
       NOTE_RINGS: 0.5,
       ROCKS: false, // the old foreground boulders
@@ -425,7 +525,7 @@ export const PROFILE = {
     // the aurora: pale and faint at dusk, vivid at night, giving way to dawn
     AURORA: { GAIN: [0.55, 1.0], SATURATION: [0.4, 1.0], DAWN_FADE: 0.45 },
     WATER: [0.006, 0.014, 0.024], // base water colour at night 0 (night 1: almost black)
-    SNOW: 0.3, // how much the dusk / dawn glow lights the snow
+    SNOW: 0.08, // how much the dusk / dawn glow lights the snow (the mountains are silhouettes)
   },
 };
 
@@ -462,6 +562,41 @@ export const TUNE = [
   ['AURORA.NOISE.FREQUENCY', 'noise: ray frequency', 0.2, 1.5, 0.05],
   ['AURORA.NOISE.EDGE', 'noise: edge softness', 1, 2.5, 0.05],
   ['AURORA.NOISE.SMOOTH.RELEASE', 'noise: audio release (s)', 0.1, 3, 0.05],
+  { group: 'alive (REACTIVITY: D overlay, [ ])' },
+  ['ALIVE.LEVEL.QUIET', 'level: quiet percentile', 0, 0.9, 0.01],
+  ['ALIVE.LEVEL.CURVE', 'level: curve', 0.5, 3, 0.05],
+  ['ALIVE.LEVEL.RELEASE', 'level: release (s)', 0.1, 4, 0.05],
+  ['ALIVE.RANGE.BRIGHT.0', 'brightness: quiet', 0.02, 1, 0.01],
+  ['ALIVE.RANGE.BRIGHT.1', 'brightness: loud', 0.3, 3, 0.05],
+  ['ALIVE.RANGE.HEIGHT.1', 'height: loud', 0.8, 2.5, 0.05],
+  ['ALIVE.RANGE.MOVE.1', 'movement: loud', 0.5, 3, 0.05],
+  ['ALIVE.SPEED.RANGE.0', 'speed: quiet', 0.1, 1.5, 0.01],
+  ['ALIVE.SPEED.RANGE.1', 'speed: loud', 0.5, 4, 0.05],
+  ['ALIVE.SPEED.MOMENTUM', 'speed: momentum', 0, 6, 0.1],
+  ['ALIVE.KICK.GAIN', 'note kick', 0, 1, 0.01],
+  ['ALIVE.KICK.DECAY', 'note kick decay (s)', 0.1, 2, 0.05],
+  ['ALIVE.KICK.PULSE', 'note pulse', 0, 3, 0.05],
+  ['ALIVE.SWELL.GAIN', 'low swell', 0, 2, 0.05],
+  ['ALIVE.ACCENT.GLOW', 'accent glow', 0, 1.5, 0.05],
+  ['ALIVE.MOTION.SWAY', 'sway (rad)', 0, 0.4, 0.01],
+  ['ALIVE.MOTION.ROTATE', 'rotation (rad)', 0, 0.3, 0.01],
+  ['ALIVE.MOTION.BILLOW', 'billow', 0, 4, 0.05],
+  ['ALIVE.MOTION.DRIFT', 'ribbon travel', 0, 6, 0.1],
+  ['ALIVE.STARS.ROTATION', 'star rotation', 0, 0.01, 0.0001],
+  { group: 'mist' },
+  ['MIST.COVER', 'mist: cover threshold', -0.4, 0.6, 0.01],
+  ['MIST.SOFT', 'mist: softness', 0.05, 1, 0.01],
+  ['MIST.WARP', 'mist: billow', 0, 1.5, 0.01],
+  ['MIST.ROLL', 'mist: roll rate', 0, 0.3, 0.005],
+  ['MIST.LAYERS.0.OPACITY', 'mist: far opacity', 0, 1, 0.01],
+  ['MIST.LAYERS.1.OPACITY', 'mist: valleys opacity', 0, 1, 0.01],
+  ['MIST.LAYERS.2.OPACITY', 'mist: near opacity', 0, 1, 0.01],
+  ['MIST.LAYERS.3.OPACITY', 'mist: water opacity', 0, 1, 0.01],
+  ['MIST.LAYERS.2.SPEED', 'mist: near speed', 0, 0.1, 0.001],
+  ['MIST.TINT', 'mist: aurora tint', 0, 3, 0.05],
+  ['MIST.OVERHEAD', 'mist: overhead glow', 0, 3, 0.05],
+  ['MIST.REFLECT', 'mist: in the water', 0, 1.5, 0.05],
+  ['LOOK.CLOUDS.EDGE_GLOW', 'clouds: edge glow', 0, 3, 0.05],
   { group: 'look' },
   ['LOOK.CURTAINS.GAIN', 'curtains: light', 0, 8, 0.1],
   ['LOOK.CURTAINS.BEND', 'curtains: bend', 0, 0.06, 0.002],

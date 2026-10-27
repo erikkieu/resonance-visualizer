@@ -13,7 +13,8 @@
 // edge (uVp.w), the packets light and lift it. A twist around a point in the
 // upper left (uCurl) curls the sky into a loop, and folds seen edge-on come
 // out brighter.
-// Up to 6 ribbons (LOOK.RIBBONS: uRib, uRib2, uRib3) each ride one lookup row
+// Up to 6 ribbons (LOOK.RIBBONS: uRib, uRib2, uRib3; swaying around the VP on
+// the clock while the whole system turns slowly to and fro: uMove) each ride one lookup row
 // (0-1 the melody layer, coloured from uRampMel; 2-3 the low layer, from
 // uRampLow) with their own edge, length, colour offset, drift and billow (a
 // slow domain warp of their own), so they cross and overlap; uRib2.w fades
@@ -52,6 +53,7 @@ uniform vec4 uBillow;             // y = billow frequency (per screen height), w
 uniform vec4 uRays;               // x = climax fan (share of the view angle), y = fade toward the top, w = saturation
 uniform vec4 uGlowShape;          // x = glow where the rays converge near the VP, y = fade toward the far left, z = × the low layer's light
 uniform vec4 uTex;                // x = ray texture contrast, y = frequency across (per radian), z = along (per screen height), w = curtain light gain
+uniform vec4 uMove;               // x = each ribbon's sway (radians), y = the whole system's turn around the VP (radians), z = sway phase
 varying vec2 vUv;
 
 
@@ -101,7 +103,7 @@ void main() {
   // around the vanishing point: r = distance (height on a curtain), th0 = angle (place along it)
   vec2 d = p - vec2(uVp.x * uAspect, uVp.y);
   float r = length(d);
-  float th0 = atan(d.x, -d.y);
+  float th0 = atan(d.x, -d.y) + uMove.y;
 
   vec3 accMel = vec3(0.0);
   vec3 accLow = vec3(0.0);
@@ -115,7 +117,9 @@ void main() {
     float row = (fk + 0.5) / 4.0;
     float base = pick(uRowZ, fk);
     // its own large, slow billows: the angle bends with the distance, so the sheet curves and folds
-    float th = th0 + C.x * snoise(vec3(r * uBillow.y, th0 * 0.9 + float(k) * 3.7, C.y));
+    // (and its sway: every ribbon at its own phase and rate, so they cross)
+    float th = th0 + uMove.x * sin(uMove.z * (0.7 + 0.13 * float(k)) + float(k) * 2.1)
+             + C.x * snoise(vec3(r * uBillow.y, th0 * 0.9 + float(k) * 3.7, C.y));
     th = clamp(th, -1.5, 1.5);
     // (the climax fans the ribbons wide: each spans more of the view; the thin ones drift past)
     float su = 0.5 + uVp.z * sin(th) * (1.0 - uRays.x) + B.z;

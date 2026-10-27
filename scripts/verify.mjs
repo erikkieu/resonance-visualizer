@@ -97,6 +97,7 @@ import { createServer } from 'vite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { PIECES, ANALYSIS_DIR } from '../src/pieces.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -135,6 +136,11 @@ const VIVID = args.includes('--vivid');
 const VIVID_TIMES = [10, 80, 160, 260, 290, 350]; // quiet, 1:20, 2:40, building, climax, fade
 const VIVID_SHOTS = [10, 260, 290];
 const WATER_LINE = 0.18; // HORIZON in src/shaders/aurora/common.glsl (screen height of the water line)
+const ALIVE = args.includes('--alive');
+const ALIVE_STEP = 2; // s between samples while the whole piece plays
+const ALIVE_SEQ = [[208, 'quiet'], [290, 'climax']]; // 3:28 (the 3:11-3:30 release: level ~0.2) // 5 frames 0.5 s apart at each
+const ALIVE_SHOTS = [[100, 'quiet'], [255, 'build'], [292, 'climax']]; // 1:40 (the 1:32-1:51 release)
+const ALIVE_SEEK = [120, 60, 120]; // seek test: the same playhead twice, from different directions
 const SMOOTH = args.includes('--smooth');
 const SMOOTH_WINDOWS = [[10, 'quiet'], [255, 'building'], [287, 'climax']].filter(([t]) => !flag('--windows') || flag('--windows').split(',').map(Number).includes(t)); // s, 5 s each (--windows 287 = only those)
 const SMOOTH_SHOTS = [160, 290, 350]; // s: 20 s of the 1:04 swell's melody: packets spawned against notes heard
@@ -264,6 +270,16 @@ async function verifyPiece(browser, url, piece) {
     const fps = await page.evaluate(() => window.__resonance.fps);
     fs.writeFileSync(path.join(dir, 'vivid-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
     console.log(`  fps ${fps.toFixed(1)} · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
+    console.log(`  -> ${dir}`);
+    await page.close();
+    return;
+  }
+
+  if (ALIVE) {
+    const result = await alivePass(page, dir, seekAndPlay, analysis);
+    const fps = await page.evaluate(() => window.__resonance.fps);
+    fs.writeFileSync(path.join(dir, 'alive-report.json'), JSON.stringify({ piece: piece.id, gpu, fps, errors, ...result }, null, 2));
+    console.log(`  fps ${fps.toFixed(1)} (lowest 2-s sample ${result.minFps.toFixed(0)}) · console errors ${errors.length}${errors.length ? ':\n    ' + errors.slice(0, 5).join('\n    ') : ''}`);
     console.log(`  -> ${dir}`);
     await page.close();
     return;
@@ -1057,6 +1073,286 @@ async function smoothPass(page, dir, seekAndPlay) {
   const ok = (v) => (v ? 'PASS' : 'FAIL');
   console.log(`  ${ok(checks.flicker)} flicker -40 % · ${ok(checks.temporalNoise)} temporal noise -40 % · ${ok(checks.grain)} grain -40 % · ${ok(checks.brightness)} brightness not down > 10 % · ${ok(checks.colour)} colour range kept · shots ${SMOOTH_SHOTS.map(fmt).join(', ')}`);
   return { rows, shots, checks };
+}
+
+/**
+ * Installs a per-frame logger in the page: every frame the playhead, the
+ * seek counter and the scene's aliveState (brightness gain, speed
+ * multiplier, clocks, kick, mist offsets); every ALIVE_STEP s of playhead a
+ * sample with the music values and the rendered aurora light (the 1x1
+ * ambient target, read back). Before the aliveState existed (a baseline run
+ * on an older commit) it falls back to the scene's old fields.
+ */
+function installAliveLog(page) {
+  return page.evaluate((step) => {
+    const half = (h) => {
+      const e = (h >> 10) & 31;
+      const m = h & 1023;
+      const s = h >> 15 ? -1 : 1;
+      return e === 0 ? s * 2 ** -14 * (m / 1024) : e === 31 ? NaN : s * 2 ** (e - 15) * (1 + m / 1024);
+    };
+    const legacy = (sc) => {
+      const s = sc.shared;
+      const u = sc.auroraMat.uniforms;
+      const bright = (0.8 + 0.5 * s.uEnergy.value) * (1 + 0.25 * s.uBass.value) * (1 + 0.4 * s.uSurge.value) * s.uBright.value * u.uTex.value.w;
+      const cl = sc.landMat.uniforms.uCloudLight.value;
+      return { bright, speed: sc.speed, clock: sc.time, sky: sc.realTime, kick: s.uSurge.value, mist: [cl.z, -cl.w, 0, 0], ribbons: sc.auroraState.ribbons, ribbonSpeed: sc.auroraState.melody.speed, x: sc.amp, section: sc.perf?.stage ?? '' };
+    };
+    const L = (window.__aliveLog = { frames: [], samples: [], next: -1, on: true });
+    const tick = () => {
+      const r = window.__resonance;
+      const sc = r.manager.current?.scene;
+      const p = r.perf;
+      if (sc?.auroraMat && L.on) {
+        const a = sc.aliveState ?? legacy(sc);
+        L.frames.push([performance.now(), p.t, p.jumpId, a.bright, a.speed, a.clock, a.sky, a.kick, ...a.mist]);
+        if (L.next < 0 || p.t < L.next - step) L.next = Math.ceil(p.t / step) * step;
+        if (p.t >= L.next) {
+          L.next += step;
+          let light = 0;
+          try {
+            const buf = new Uint16Array(4);
+            r.renderer.readRenderTargetPixels(sc.ambientTarget, 0, 0, 1, 1, buf);
+            light = 0.2126 * half(buf[0]) + 0.7152 * half(buf[1]) + 0.0722 * half(buf[2]);
+          } catch {
+            light = NaN;
+          }
+          L.samples.push({ t: p.t, level: p.level, drive: p.drive, climax: p.climax, section: p.section ? p.section.role : p.stage, bright: a.bright, light, speed: a.speed, ribbonSpeed: a.ribbonSpeed, ribbons: a.ribbons, x: a.x, state: a.section, mist: a.mist.slice(), fps: r.fps });
+        }
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }, ALIVE_STEP);
+}
+
+const pearson = (a, b) => {
+  const n = a.length;
+  const ma = a.reduce((s, v) => s + v, 0) / n;
+  const mb = b.reduce((s, v) => s + v, 0) / n;
+  let sab = 0;
+  let saa = 0;
+  let sbb = 0;
+  for (let i = 0; i < n; i++) {
+    sab += (a[i] - ma) * (b[i] - mb);
+    saa += (a[i] - ma) ** 2;
+    sbb += (b[i] - mb) ** 2;
+  }
+  return sab / Math.sqrt(saa * sbb || 1);
+};
+
+/** Mean absolute luminance change between consecutive frames, in the sky and in the mist band (fractions from the top). */
+function frameMotion(page, files, bands) {
+  return page.evaluate(
+    async ({ imgs, bands }) => {
+      const lin = new Float32Array(256).map((_, i) => (i / 255 <= 0.04045 ? i / 255 / 12.92 : ((i / 255 + 0.055) / 1.055) ** 2.4));
+      const W = 320;
+      const H = 180;
+      const lums = [];
+      for (const b64 of imgs) {
+        const img = new Image();
+        img.src = `data:image/png;base64,${b64}`;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = W;
+        c.height = H;
+        const g = c.getContext('2d');
+        g.drawImage(img, 0, 0, W, H);
+        const px = g.getImageData(0, 0, W, H).data;
+        const Y = new Float32Array(W * H);
+        for (let i = 0; i < W * H; i++) Y[i] = 0.2126 * lin[px[4 * i]] + 0.7152 * lin[px[4 * i + 1]] + 0.0722 * lin[px[4 * i + 2]];
+        lums.push(Y);
+      }
+      const out = {};
+      for (const [name, [y0, y1]] of Object.entries(bands)) {
+        let d = 0;
+        let m = 0;
+        let n = 0;
+        for (let f = 1; f < lums.length; f++) {
+          for (let y = Math.floor(y0 * H); y < Math.floor(y1 * H); y++) {
+            for (let x = 0; x < W; x++) {
+              d += Math.abs(lums[f][y * W + x] - lums[f - 1][y * W + x]);
+              m += lums[f][y * W + x];
+              n++;
+            }
+          }
+        }
+        out[name] = { change: d / n, mean: m / n, relative: d / Math.max(m, 1e-9) };
+      }
+      return out;
+    },
+    { imgs: files.map((f) => fs.readFileSync(f).toString('base64')), bands },
+  );
+}
+
+/**
+ * Scene 2 "more alive": plays the whole piece once, sampling every ALIVE_STEP s
+ * (loudness, aurora brightness gain and rendered light, ribbon speed, speed
+ * multiplier, ribbons, mist offsets), logs every frame for the onset latency
+ * and the clock checks, then tests seeks, captures 5-frame sequences at a
+ * quiet moment and the climax, and screenshots at ALIVE_SHOTS.
+ */
+async function alivePass(page, dir, seekAndPlay, analysis) {
+  await installAliveLog(page);
+  const dur = analysis.duration;
+  console.log(`  playing the whole piece (${fmt(dur)}), sampling every ${ALIVE_STEP} s ...`);
+  await seekAndPlay(0.05, 0);
+  await page.waitForFunction((d) => window.__resonance.perf.t >= d - 1.2 || window.__resonance.audio.element.ended, dur, { timeout: (dur + 60) * 1000, polling: 500 });
+  const { samples, frames } = await page.evaluate(() => {
+    window.__aliveLog.on = false;
+    return { samples: window.__aliveLog.samples, frames: window.__aliveLog.frames };
+  });
+  const S = samples.filter((s) => s.t > 1 && s.t < dur - 2);
+  console.log('     time  section    level  drive  x     bright  light    speed  ribbon-speed  ribbons  mist offsets per layer          fps');
+  for (const s of S) {
+    console.log(`  ${fmt(s.t).padStart(7)}  ${String(s.section).padEnd(9)}  ${s.level.toFixed(2)}   ${s.drive.toFixed(2)}   ${(s.x ?? 0).toFixed(2)}  ${s.bright.toFixed(3)}   ${s.light.toFixed(4)}   ${s.speed.toFixed(2)}   ${(s.ribbonSpeed ?? 0).toFixed(3)}         ${String(s.ribbons).padStart(2)}       ${s.mist.map((m) => m.toFixed(2).padStart(7)).join(' ')}   ${s.fps.toFixed(0)}`);
+  }
+
+  // onset strength: the summed strength of the onsets in the second before each sample
+  const on = analysis.onsets;
+  const onsetIn = (t0, t1) => on.times.reduce((s, t, i) => s + (t > t0 && t <= t1 ? on.strength[i] : 0), 0);
+  const col = (k) => S.map((s) => s[k]);
+  const onset = S.map((s) => onsetIn(s.t - 1, s.t));
+  const corr = {
+    brightLevel: pearson(col('level'), col('bright')),
+    lightLevel: pearson(col('level'), col('light')),
+    speedLevel: pearson(col('level'), col('speed')),
+    brightDrive: pearson(col('drive'), col('bright')),
+    brightOnset: pearson(onset, col('bright')),
+    speedOnset: pearson(onset, col('speed')),
+  };
+  // the quietest and the loudest minute (60 s windows, by mean level)
+  const win = [];
+  for (let t0 = 0; t0 + 60 <= dur - 2; t0 += ALIVE_STEP) {
+    const w = S.filter((s) => s.t >= t0 && s.t < t0 + 60);
+    if (w.length < 20) continue;
+    const m = (k) => w.reduce((a, s) => a + s[k], 0) / w.length;
+    win.push({ t0, level: m('level'), bright: m('bright'), light: m('light'), speed: m('speed'), ribbonSpeed: m('ribbonSpeed') });
+  }
+  const quiet = win.reduce((a, w) => (w.level < a.level ? w : a));
+  const loud = win.reduce((a, w) => (w.level > a.level ? w : a));
+  const ratios = { bright: loud.bright / quiet.bright, light: loud.light / quiet.light, speed: loud.speed / quiet.speed, ribbonSpeed: loud.ribbonSpeed / quiet.ribbonSpeed };
+
+  // reaction latency: strong onsets (top 20 % by strength, none strong in the 0.5 s before), the first
+  // frame where the brightness gain rises 5 % over its level just before the onset
+  const sorted = [...on.strength].sort((a, b) => a - b);
+  const strong = sorted[Math.floor(0.8 * sorted.length)];
+  const F = frames.filter((f) => f[1] > 2);
+  const latencies = [];
+  on.times.forEach((t, i) => {
+    if (on.strength[i] < strong || t < 5 || t > dur - 5) return;
+    if (on.times.some((u, j) => j !== i && on.strength[j] >= strong && u < t && u > t - 0.5)) return;
+    const before = F.filter((f) => f[1] > t - 0.35 && f[1] <= t - 0.15);
+    if (!before.length) return;
+    const b0 = Math.max(...before.map((f) => f[3]));
+    const hit = F.find((f) => f[1] > t - 0.15 && f[1] < t + 0.5 && f[3] > b0 * 1.05);
+    latencies.push(hit ? hit[1] - t : Infinity);
+  });
+  const lat = latencies.filter(Number.isFinite).sort((a, b) => a - b);
+  const latency = { onsets: latencies.length, reacted: lat.length, median: lat[Math.floor(lat.length / 2)] ?? NaN, p90: lat[Math.floor(lat.length * 0.9)] ?? NaN };
+
+  // clocks: mist offsets only grow with the playhead (no seek in this run), the layers move at different speeds
+  let back = 0;
+  let maxStep = 0;
+  for (let i = 1; i < F.length; i++) {
+    if (F[i][2] !== F[i - 1][2]) continue;
+    for (let k = 8; k < F[i].length; k++) if (F[i][k] < F[i - 1][k] - 1e-6) back++;
+    maxStep = Math.max(maxStep, (F[i][6] - F[i - 1][6]) / Math.max(1e-3, F[i][1] - F[i - 1][1]));
+  }
+  const last = S[S.length - 1].mist;
+  const first = S[0].mist;
+  const layerSpeeds = last.map((m, k) => (m - first[k]) / (S[S.length - 1].t - S[0].t));
+  const peak = S.reduce((a, s) => (s.speed > a.speed ? s : a));
+
+  // seeks: the same playhead reached from two directions gives the same clocks; no jump after the seek
+  const seekRows = [];
+  for (const t of ALIVE_SEEK) {
+    await page.evaluate(() => {
+      window.__aliveLog.frames = [];
+      window.__aliveLog.on = true;
+    });
+    await seekAndPlay(t, 0);
+    await sleep(1200);
+    const fr = await page.evaluate(() => {
+      window.__aliveLog.on = false;
+      return window.__aliveLog.frames;
+    });
+    const after = fr.filter((f) => f[1] >= t && f[1] < t + 1.1);
+    const at = after[0];
+    let jump = 0;
+    for (let i = 1; i < after.length; i++) {
+      const dp = after[i][1] - after[i - 1][1];
+      const ds = after[i][6] - after[i - 1][6];
+      jump = Math.max(jump, ds / Math.max(dp, 1 / 120));
+    }
+    seekRows.push({ t, playhead: at?.[1], sky: at?.[6], mist: at?.slice(8), maxRate: jump });
+  }
+  const [s1, , s3] = seekRows;
+  const seekSame = s1.sky !== undefined && s3.sky !== undefined && Math.abs(s1.sky - s3.sky) < 0.05 + peakRate(S) * Math.abs(s1.playhead - s3.playhead);
+  const seekSmooth = seekRows.every((r) => r.maxRate < peak.speed * 1.6 + 0.5);
+
+  // 5-frame sequences, 0.5 s apart
+  const seqs = {};
+  for (const [t, name] of ALIVE_SEQ) {
+    await seekAndPlay(t);
+    const files = [];
+    for (let i = 0; i < 5; i++) {
+      await page.waitForFunction((s) => window.__resonance.perf.t >= s, t + 0.5 * i, { polling: 10 });
+      const file = path.join(dir, `alive-seq-${name}-${i}.png`);
+      await page.screenshot({ path: file });
+      files.push(file);
+    }
+    const st = await page.evaluate(() => window.__resonance.manager.current.scene.aliveState ?? null);
+    seqs[name] = { files, motion: await frameMotion(page, files, { sky: [0, 0.6], mist: [0.6, 0.86], water: [0.86, 1] }), state: st };
+    sheet(files, path.join(dir, `alive-seq-${name}-sheet.png`));
+  }
+  const shots = [];
+  for (const [t, name] of ALIVE_SHOTS) {
+    await seekAndPlay(t);
+    const file = path.join(dir, `alive-${name}-${fmt(t).replace(':', 'm')}.png`);
+    await page.screenshot({ path: file });
+    shots.push(file);
+  }
+  // cleanliness at the climax (same measures as --smooth)
+  await seekAndPlay(287);
+  const noise = await measureNoise(page, 4000);
+
+  const ok = (b) => (b ? 'PASS' : 'FAIL');
+  const checks = {
+    correlation: corr.brightLevel > 0.7 && corr.speedLevel > 0.7,
+    brightness: ratios.bright >= 12,
+    speed: ratios.ribbonSpeed >= 8,
+    latency: latency.reacted > 0 && latency.p90 <= 0.08,
+    monotonic: back === 0,
+    layers: new Set(layerSpeeds.map((v) => v.toFixed(3))).size === layerSpeeds.length && layerSpeeds.every((v) => v > 0),
+    seek: seekSame && seekSmooth,
+    climax: peak.t >= 272 && peak.t <= 300,
+    motion: seqs.climax.motion.sky.change > 2 * seqs.quiet.motion.sky.change,
+  };
+  console.log(`  correlation with loudness: brightness ${corr.brightLevel.toFixed(2)} (rendered light ${corr.lightLevel.toFixed(2)}, vs drive ${corr.brightDrive.toFixed(2)}) · speed ${corr.speedLevel.toFixed(2)} · with onset strength: brightness ${corr.brightOnset.toFixed(2)}, speed ${corr.speedOnset.toFixed(2)}`);
+  console.log(`  quietest minute ${fmt(quiet.t0)}-${fmt(quiet.t0 + 60)} (level ${quiet.level.toFixed(2)}) vs loudest ${fmt(loud.t0)}-${fmt(loud.t0 + 60)} (level ${loud.level.toFixed(2)}): brightness ×${ratios.bright.toFixed(1)} (rendered light ×${ratios.light.toFixed(1)}) · speed multiplier ×${ratios.speed.toFixed(1)} · ribbon speed ×${ratios.ribbonSpeed.toFixed(1)}`);
+  console.log(`  reaction to strong onsets (>= ${strong.toFixed(2)}): ${latency.reacted}/${latency.onsets} kicked within 0.5 s · latency median ${(latency.median * 1000).toFixed(0)} ms, p90 ${(latency.p90 * 1000).toFixed(0)} ms (negative = ahead of the note)`);
+  console.log(`  mist: ${back} backward steps · layer speeds ${layerSpeeds.map((v) => v.toFixed(4)).join(' / ')} per s of piece · sky clock max rate ${maxStep.toFixed(2)} · fastest moment ${fmt(peak.t)} (speed ${peak.speed.toFixed(2)})`);
+  console.log(`  seeks: ${seekRows.map((r) => `${fmt(r.t)} -> sky ${r.sky?.toFixed(3)} (max rate after ${r.maxRate.toFixed(2)})`).join(' · ')}`);
+  for (const [name, s] of Object.entries(seqs)) console.log(`  sequence ${name}: frame-to-frame change sky ${(s.motion.sky.change * 1000).toFixed(2)}‰ (${(s.motion.sky.relative * 100).toFixed(1)} % of its light) · mist band ${(s.motion.mist.change * 1000).toFixed(2)}‰ (${(s.motion.mist.relative * 100).toFixed(1)} %) · water ${(s.motion.water.change * 1000).toFixed(2)}‰`);
+  console.log(`  climax noise (4 s): flicker ${(noise.flicker * 1000).toFixed(2)}‰ · temporal noise ${(noise.boil * 1000).toFixed(3)}‰ · grain ${(noise.grain * 1000).toFixed(2)}‰ · lum ${(noise.lum * 1000).toFixed(1)}‰ · fps ${noise.fps.toFixed(0)}`);
+  console.log(`  ${ok(checks.correlation)} correlation > 0.7 · ${ok(checks.brightness)} brightness ×12 · ${ok(checks.speed)} ribbon speed ×8 · ${ok(checks.latency)} kick within 80 ms · ${ok(checks.monotonic)} mist monotonic · ${ok(checks.layers)} layers at different speeds · ${ok(checks.seek)} seek-safe · ${ok(checks.climax)} fastest at the climax · ${ok(checks.motion)} climax motion > 2× quiet`);
+  const minFps = Math.min(...S.map((s) => s.fps));
+  return { samples: S, corr, quiet, loud, ratios, latency, layerSpeeds, backSteps: back, seeks: seekRows, peak, sequences: seqs, shots, noise, checks, minFps };
+}
+
+/** Sky clock units per second of playhead at the fastest sample (a bound for the seek check). */
+function peakRate(S) {
+  return Math.max(...S.map((s) => s.speed));
+}
+
+/** 5 frames stacked into one contact sheet (ffmpeg), for looking at the motion. */
+function sheet(files, out) {
+  try {
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', ...files.flatMap((f) => ['-i', f]), '-filter_complex', `${files.map((_, i) => `[${i}]scale=640:-1[s${i}]`).join(';')};${files.map((_, i) => `[s${i}]`).join('')}vstack=inputs=${files.length}`, out]);
+  } catch (err) {
+    console.log(`  (no contact sheet: ${err.message.split('\n')[0]})`);
+  }
 }
 
 main().catch((err) => {

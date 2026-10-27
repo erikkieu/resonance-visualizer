@@ -68,9 +68,27 @@ import curtainsFrag from '../shaders/aurora/curtains.frag?raw';
  * magenta fringe, 3 when quiet and 6 when loud, with HDR cores rolled off by
  * the composite's hue-keeping 'soft' tone curve; and a strong mirror of the
  * sky in the water (LOOK.WATER, R toggles it) with ripple rings on onsets.
- * Keys: R reflection, V vivid / muted palette.
- * Keys: A fades the whole aurora out and in, L the low layer, M the melody,
- * N clean / previous look, C clouds, B the ship.
+ * More alive (PROFILE.ALIVE, _updateAlive): loudness becomes an intensity
+ * x (the anticipating drive normalised to the piece, soft knee, ^1.6) that
+ * widens every mapping (brightness, ribbon height and spread, saturation,
+ * hue range, movement), scaled by a global REACTIVITY ([ ] and a slider in
+ * the debug overlay). Every melody note kicks the brightness (peaking on
+ * the note) and sends a bright pulse along its wave; strong low notes swell
+ * and lift the big lower ribbons; accents (the strongest fifth of the
+ * onsets) lift a glow and ripple the water. Each section's role sets an
+ * energy state (movement, ribbon count, brightness ceiling, colour range).
+ * One clock drives every motion: time += dt × speed (0.45x quiet .. ~3x at
+ * the climax, from loudness and its momentum). With a score the speed is
+ * computed for the whole piece and integrated in advance, so the clock is a
+ * function of the playhead (a seek lands on the same sky, never a jump).
+ * The ribbons sway, billow, travel and cross, the curtain system turns to
+ * and fro around the vanishing point, the loop forms and unravels, the rays
+ * fan open, the stars wheel slowly around a pole and the cloud wisps drift.
+ * Mist and low clouds (PROFILE.MIST, landscape.frag) roll along the horizon
+ * in 4 depth layers on the same clock, lit from above by the aurora.
+ * Keys: R reflection, V vivid / muted palette, M mist, [ ] reactivity.
+ * Keys: A fades the whole aurora out and in, L the low layer, K the melody
+ * layer, N clean / previous look, C clouds, B the ship.
  */
 
 const AU = PROFILE.AURORA;
@@ -155,6 +173,40 @@ function monotone(xs, ys) {
 const SHAPE_KEYS = ['height', 'width', 'cover', 'bright', 'fold'];
 const lerp = (a, b, x) => a + (b - a) * x;
 
+const AL = PROFILE.ALIVE;
+const MI = PROFILE.MIST;
+// a [quiet, loud] range at x, widened by the reactivity r around its geometric middle
+const react = ([a, b], x, r) => {
+  const m = Math.sqrt(a * b);
+  return m * ((a + (b - a) * x) / m) ** r;
+};
+const smooth01 = (x) => {
+  const f = clamp01(x);
+  return f * f * (3 - 2 * f);
+};
+// a section's role when there is no score (the live stage)
+const ROLE_OF_STAGE = { calm: 'release', building: 'build', climax: 'climax', resolving: 'release' };
+const SECTION_KEYS = ['MOVE', 'RIBBONS', 'BRIGHT', 'COLOUR'];
+/** The energy state of a section `role`, cross-fading (0..1) into `next`'s. */
+function sectionMix(role, next, cross, out = {}) {
+  const S = AL.SECTIONS;
+  const a = S[role] ?? S.build;
+  const b = S[next] ?? a;
+  for (const k of SECTION_KEYS) out[k] = lerp(a[k], b[k], cross);
+  return out;
+}
+/** One step of the speed multiplier: the smoothed intensity, its momentum, the section's movement. */
+function speedStep(s, x, move, dt, r) {
+  const S = AL.SPEED;
+  const prev = s.xs;
+  s.xs += (x - s.xs) * (1 - Math.exp(-dt / (x > s.xs ? S.ATTACK : S.RELEASE)));
+  s.mom += (Math.max(0, (s.xs - prev) / dt) - s.mom) * (1 - Math.exp(-dt / S.MOMENTUM_TIME));
+  const v = react(S.RANGE, s.xs, r) * move * (1 + S.MOMENTUM * s.mom);
+  // a soft ceiling: faster still means faster, so the climax stays the fastest moment
+  const [lo, hi] = S.LIMIT;
+  return v <= lo ? lo : lo + (hi - lo) * (1 - Math.exp(-(v - lo) / (hi - lo)));
+}
+
 // aurora pass resolution (fraction of the scene target)
 const AURORA = [{ scale: 0.4 }, { scale: 0.36 }, { scale: 0.32 }, { scale: 0.28 }];
 
@@ -207,12 +259,39 @@ export default class Scene2Aurora extends SceneBase {
     this.ribbonShow = LK.RIBBONS.map(() => 0);
     this.melGlow = 0; // melody activity, smoothed (ship lights)
     this.rippleKick = 0; // strong melody notes -> extra rings
-    this.on = 1; // A toggles the aurora, L and M one layer each
+    this.on = 1; // A toggles the aurora, L and K one layer each
     this.onTarget = 1;
+    // more alive (PROFILE.ALIVE): intensity, section state, the clock, kicks, swells, accents
+    this.alive = {
+      x: 0, // intensity 0..1
+      sec: sectionMix('release', 'release', 0),
+      map: null, // the analysis the percentiles and the clock curve belong to
+      quiet: 0, // level percentiles (sCurve space) of the piece
+      loud: 1,
+      accentAt: 1, // onset strength of the strongest SHARE
+      curve: null, // { sig, rate, speed: Float32Array, clock: Float64Array }
+      offset: 0, // clock offset: paused time, retuning
+      live: { xs: 0, mom: 0 }, // the live speed integrator
+      clock: 0,
+      speed: AL.SPEED.RANGE[0],
+      bright: 1, // the aurora's music gain (debug, verify)
+      kick: { hold: 0, v: 0, last: -1e9 },
+      swell: { hold: 0, v: 0, last: -1e9 },
+      glow: { hold: 0, v: 0, last: -1e9 },
+      queue: [], // scheduled { at (realTime), kind, s }
+      lastAccentT: -1,
+      accentRing: 0, // an accent fired this frame (strength) -> a ring on the water
+      hue: 0, // melody pitch -> ribbon hue shift (ramp units)
+    };
+    this.mistOn = MI.ON ? 1 : 0;
+    this.mistTarget = this.mistOn;
+    this.debugControls = [{ label: 'reactivity', min: 0.5, max: 3, step: 0.05, get: () => AL.REACTIVITY, set: (v) => (AL.REACTIVITY = v) }];
     this._onKey = (e) => {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
       const k = e.key.toLowerCase();
+      if (k === '[' || k === ']') AL.REACTIVITY = Math.round(Math.min(3, Math.max(0.5, AL.REACTIVITY + (k === ']' ? 0.1 : -0.1))) * 100) / 100;
+      if (k === 'm') this.mistTarget = this.mistTarget > 0 ? 0 : 1;
       if (k === 'a') this.onTarget = this.onTarget > 0 ? 0 : 1;
       if (k === 'n') this.clean = !this.clean;
       if (k === 'c') this.cloudsTarget = this.cloudsTarget > 0 ? 0 : 1;
@@ -222,7 +301,7 @@ export default class Scene2Aurora extends SceneBase {
         this.vivid = !this.vivid;
         this._writeRamps();
       }
-      const l = k === 'l' ? this.layers.low : k === 'm' ? this.layers.melody : null;
+      const l = k === 'l' ? this.layers.low : k === 'k' ? this.layers.melody : null;
       if (l) l.onTarget = l.onTarget > 0 ? 0 : 1;
     };
     window.addEventListener('keydown', this._onKey);
@@ -254,7 +333,8 @@ export default class Scene2Aurora extends SceneBase {
     };
     // the tallest a curtain can get: base height + a full packet's lift (+ the melody's pitch height)
     const tall = (L) => (L.HEIGHT + 1.2 * (L.LIFT + (L.HEIGHT_PITCH ?? 0)) * AU.SCALE.SIZE[1]) * AU.SCALE.HEIGHT[1];
-    this.shared.uTopScale.value = Math.max(tall(AU.LOW), tall(AU.MELODY));
+    // (× the loudest ribbon height ALIVE can ask for, and a swell)
+    this.shared.uTopScale.value = Math.max(tall(AU.LOW), tall(AU.MELODY)) * react(AL.RANGE.HEIGHT, 1, 3) * (1 + AL.SWELL.GROW);
     const prefix = noiseGLSL + commonGLSL;
     this.auroraMat = passMaterial({
       fragmentShader: prefix + auroraFrag,
@@ -284,6 +364,7 @@ export default class Scene2Aurora extends SceneBase {
         uRays: { value: new THREE.Vector4() },
         uTex: { value: new THREE.Vector4() },
         uGlowShape: { value: new THREE.Vector4() },
+        uMove: { value: new THREE.Vector4() },
       },
     });
     this.landMat = passMaterial({
@@ -383,10 +464,12 @@ export default class Scene2Aurora extends SceneBase {
     const W = AU.SCALE;
     const wave = (range) => lerp(1, lerp(range[0], range[1], this.amp), presence); // idle: the plain look
 
-    // --- the clock: slow ripples when quiet; with nothing playing, the old gentle idle
-    const speedTarget = lerp(0.35 + 1.5 * audio.energy, lerp(P.SPEED.QUIET, P.SPEED.FULL, this.build) * st.speed, presence) * wave([0.45, 1.25]);
-    this.speed = jumped ? speedTarget : follow(this.speed, speedTarget, P.SPEED.SMOOTHING / 2);
-    this.time += dt * this.speed;
+    // --- more alive: intensity, section state, kicks; the clock (0.45x quiet .. ~3x at the climax,
+    // a function of the playhead with a score, so a seek never makes it jump)
+    this._updateAlive(dt, audio, perf, presence, jumped);
+    const al = this.alive;
+    this.speed = al.speed;
+    this.time = al.clock;
 
     // --- curtain shape and light: lerp(QUIET, FULL, build) x stage + CLIMAX x climax (idle: the plain look)
     const plain = { height: 1, width: 1, cover: 0.5, bright: 1, fold: 1 };
@@ -395,7 +478,12 @@ export default class Scene2Aurora extends SceneBase {
       this.shape[k] = lerp(plain[k], lerp(c.QUIET, c.FULL, this.build) * st[k] + c.CLIMAX * this.climax, presence);
     }
     this.shape.warm = lerp(0, lerp(P.WARM.QUIET, P.WARM.FULL, this.build) + P.WARM.CLIMAX * this.climax, presence);
-    this.shape.fold *= wave(W.FOLD);
+    // brightness: the intensity's range × the section's ceiling, lifted by the note kicks and the accent glow
+    const R = AL.REACTIVITY;
+    al.gain = react(AL.RANGE.BRIGHT, al.x, R) * al.sec.BRIGHT * (1 + al.kick.v + al.glow.v);
+    this.shape.bright = lerp(1, al.gain, presence);
+    al.move = react(AL.RANGE.MOVE, al.x, R) * al.sec.MOVE;
+    this.shape.fold *= wave(W.FOLD) * AL.MOTION.FOLD * al.move;
     this.exposure = lerp(1.15, lerp(P.EXPOSURE.QUIET, P.EXPOSURE.FULL, this.build) + P.EXPOSURE.CLIMAX * this.climax, presence);
 
     // --- accents: a soft shimmer and colour surge (live: the old beat surge)
@@ -419,7 +507,7 @@ export default class Scene2Aurora extends SceneBase {
     this._updateNight(dt, perf, jumped);
     this._updateWaves(dt, perf, presence, jumped);
     this.on = follow(this.on, this.onTarget, 0.25);
-    this._writeAurora(wave(W.HEIGHT), dt, jumped);
+    this._writeAurora(wave(W.HEIGHT) * lerp(1, react(AL.RANGE.HEIGHT, al.x, R), presence), dt, jumped);
     this._writeNoise();
     this._writeLook(dt, perf);
 
@@ -437,6 +525,179 @@ export default class Scene2Aurora extends SceneBase {
     s.uFold.value = this.shape.fold;
     s.uBright.value = this.shape.bright;
     s.uWarm.value = this.shape.warm;
+  }
+
+  // ------------------------------------------------------------ more alive (PROFILE.ALIVE)
+
+  /** Loudness (the drive, sCurve space) -> intensity 0..1: normalised to the piece, a soft knee, ^CURVE. */
+  _intensity(drive) {
+    const L = AL.LEVEL;
+    const a = this.alive;
+    const [lo, hi] = a.map ? [a.quiet, a.loud] : L.LIVE;
+    const v = (drive - lo) / Math.max(1e-3, hi - lo);
+    const k = L.KNEE;
+    const knee = v >= k ? v : v <= -k ? 0 : (v + k) ** 2 / (4 * k);
+    return clamp01(knee) ** L.CURVE;
+  }
+
+  /** A new analysis: the level percentiles, the accent threshold, and (lazily) the clock curve. */
+  _prepareMap(map) {
+    const a = this.alive;
+    a.map = map;
+    a.curve = null;
+    if (!map) return;
+    const sc = SCORE_CONFIG.S_CURVE;
+    const s = Float32Array.from(map.level, (x) => {
+      const p = clamp01(x) ** sc;
+      return p / (p + (1 - clamp01(x)) ** sc);
+    }).sort();
+    const pct = (q) => s[Math.min(s.length - 1, Math.floor(q * (s.length - 1)))];
+    a.quiet = pct(AL.LEVEL.QUIET);
+    a.loud = Math.max(a.quiet + 0.05, pct(AL.LEVEL.LOUD));
+    const st = map.onsets.map((o) => o.strength).sort((x, y) => x - y);
+    a.accentAt = st.length ? st[Math.floor((1 - AL.ACCENT.SHARE) * (st.length - 1))] : AL.ACCENT.LIVE_STRENGTH;
+  }
+
+  /**
+   * The speed multiplier over the whole piece and its integral (the clock), at the analysis frame
+   * rate: the same drive the score follower computes (look-ahead, attack / release), the same
+   * intensity, section states and speed step as live. Rebuilt when a setting it depends on changes;
+   * the clock offset then absorbs the difference at the playhead, so a retune never jumps.
+   */
+  _clockCurve(t) {
+    const a = this.alive;
+    const map = a.map;
+    const sig = JSON.stringify([AL.REACTIVITY, AL.LEVEL, AL.SPEED, AL.RANGE.MOVE, AL.SECTIONS, AL.SECTION_BLEND]);
+    if (a.curve?.sig === sig) return a.curve;
+    const C = SCORE_CONFIG;
+    const rate = map.rate;
+    const n = map.level.length;
+    const dt = 1 / rate;
+    const sCurve = (x) => {
+      const p = clamp01(x) ** C.S_CURVE;
+      return p / (p + (1 - clamp01(x)) ** C.S_CURVE);
+    };
+    const speed = new Float32Array(n);
+    const clock = new Float64Array(n);
+    const s = { xs: 0, mom: 0 };
+    const sec = {};
+    const blend = {};
+    let drive = 0;
+    let si = 0;
+    const L = C.LOOKAHEAD;
+    for (let i = 0; i < n; i++) {
+      const tt = i * dt;
+      const ahead = map.maxAhead(map.level, tt, tt + L, (d) => 1 - (1 - C.DRIVE.AHEAD_WEIGHT) * (d / L) - 0.25 * (d / L) ** 2);
+      const target = Math.max(sCurve(map.level[i]), sCurve(ahead));
+      drive = i === 0 ? target : drive + (target - drive) * (1 - Math.exp(-dt / (target > drive ? C.DRIVE.ATTACK : C.DRIVE.RELEASE)));
+      while (si < map.sections.length - 1 && tt >= map.sections[si + 1].start) si++;
+      const cur = map.sections[si];
+      const next = map.sections[si + 1];
+      sectionMix(cur.role, next?.role, next ? smooth01(1 - (next.start - tt) / L) : 0, sec);
+      for (const k of SECTION_KEYS) blend[k] = i === 0 ? sec[k] : blend[k] + (sec[k] - blend[k]) * (1 - Math.exp(-dt / (AL.SECTION_BLEND / 3)));
+      speed[i] = speedStep(s, this._intensity(drive), blend.MOVE, dt, AL.REACTIVITY);
+      clock[i] = i === 0 ? 0 : clock[i - 1] + 0.5 * (speed[i] + speed[i - 1]) * dt;
+    }
+    const old = a.curve;
+    a.curve = { sig, rate, speed, clock };
+    if (old) a.offset += this._sampleCurve(old.clock, old.rate, t) - this._sampleCurve(clock, rate, t);
+    return a.curve;
+  }
+
+  _sampleCurve(arr, rate, t) {
+    const x = Math.max(0, t * rate);
+    const i = Math.floor(x);
+    if (i >= arr.length - 1) return arr[arr.length - 1];
+    return arr[i] + (arr[i + 1] - arr[i]) * (x - i);
+  }
+
+  /**
+   * The music -> intensity x, the section's energy state, the clock, and the
+   * scheduled reactions: melody notes kick the brightness, strong low notes
+   * swell the lower ribbons, accents lift a glow and ripple the water. Score
+   * notes are announced ahead (`in`), so each envelope peaks on its note.
+   */
+  _updateAlive(dt, audio, perf, presence, jumped) {
+    const a = this.alive;
+    const R = AL.REACTIVITY;
+    const score = perf.source === 'score' ? perf.map : null;
+    if (score !== a.map) this._prepareMap(score);
+    a.now = (a.now ?? 0) + dt;
+
+    // intensity: fast attack, slow release, a small dead-band
+    const L = AL.LEVEL;
+    const target = presence * this._intensity(perf.drive);
+    const d = target - a.x;
+    if (jumped) a.x = target;
+    else if (Math.abs(d) > L.DEADBAND) a.x += (d - Math.sign(d) * L.DEADBAND) * (1 - Math.exp(-dt / (d > 0 ? L.ATTACK : L.RELEASE)));
+
+    // the section's energy state, into the next one ahead of the change
+    const role = perf.section?.role ?? ROLE_OF_STAGE[perf.stage] ?? 'release';
+    const next = perf.next?.role;
+    const cross = next ? smooth01(1 - perf.timeToNext / SCORE_CONFIG.LOOKAHEAD) : 0;
+    const want = sectionMix(role, next, cross, a.want);
+    a.want = want;
+    a.role = role;
+    for (const k of SECTION_KEYS) a.sec[k] = jumped ? want[k] : a.sec[k] + (want[k] - a.sec[k]) * (1 - Math.exp(-dt / (AL.SECTION_BLEND / 3)));
+
+    // the clock
+    const paused = audio.element ? audio.element.paused : false;
+    if (score) {
+      const c = this._clockCurve(perf.t);
+      if (paused) a.offset += dt * AL.SPEED.IDLE;
+      a.speed = paused ? AL.SPEED.IDLE : this._sampleCurve(c.speed, c.rate, perf.t);
+      a.clock = this._sampleCurve(c.clock, c.rate, perf.t) + a.offset;
+    } else {
+      a.speed = speedStep(a.live, a.x, a.sec.MOVE, Math.max(dt, 1e-3), R);
+      a.clock += dt * a.speed;
+    }
+
+    // scheduled reactions
+    if (jumped) {
+      a.queue.length = 0;
+      a.lastAccentT = perf.t;
+    }
+    const K = AL.KICK;
+    const SW = AL.SWELL;
+    const AC = AL.ACCENT;
+    for (const e of perf.voices.melody.events) if (e.strength >= K.MIN_STRENGTH) a.queue.push({ at: a.now + e.in - 2 * K.ATTACK, kind: 'kick', s: e.strength });
+    for (const e of perf.voices.low.events) if (e.strength >= SW.MIN_STRENGTH) a.queue.push({ at: a.now + e.in - 2 * SW.ATTACK, kind: 'swell', s: e.strength });
+    if (score) {
+      for (const o of perf.upcoming) {
+        if (o.t <= a.lastAccentT) continue;
+        a.lastAccentT = o.t;
+        if (o.strength >= a.accentAt) a.queue.push({ at: a.now + o.in - 2 * AC.ATTACK, kind: 'accent', s: o.strength });
+      }
+    } else {
+      for (const o of perf.onsets) if (o.strength >= AC.LIVE_STRENGTH) a.queue.push({ at: a.now, kind: 'accent', s: o.strength });
+    }
+    const imp = { kick: 0, swell: 0, accent: 0 };
+    const gaps = { kick: [a.kick, K.MIN_GAP], swell: [a.swell, SW.MIN_GAP], accent: [a.glow, AC.MIN_GAP] };
+    a.accentRing = 0;
+    for (let i = a.queue.length - 1; i >= 0; i--) {
+      const q = a.queue[i];
+      if (q.at > a.now) continue;
+      a.queue.splice(i, 1);
+      const [env, gap] = gaps[q.kind];
+      if (a.now - env.last < gap) continue; // rate-limited: a dense run reads as one swell, not a strobe
+      env.last = a.now;
+      imp[q.kind] = Math.max(imp[q.kind], q.s);
+      if (q.kind === 'accent') a.accentRing = Math.max(a.accentRing, q.s);
+    }
+    // envelopes: an impulse into a slowly decaying hold, followed with a fast attack
+    const env = (e, i, attack, decay, gain, max) => {
+      e.hold = e.hold * Math.exp(-dt / decay) + i * gain * (R / 1.5);
+      e.raw = (e.raw ?? 0) + (e.hold - (e.raw ?? 0)) * (1 - Math.exp(-dt / attack));
+      e.v = max * (1 - Math.exp(-e.raw / max)); // a soft ceiling: a dense run never stacks into a flash
+    };
+    env(a.kick, imp.kick, K.ATTACK, K.DECAY, K.GAIN, K.MAX);
+    env(a.swell, imp.swell, SW.ATTACK, SW.DECAY, 1, 1.2);
+    env(a.glow, imp.accent, AC.ATTACK, AC.DECAY, AC.GLOW, 1);
+
+    // the melody's pitch shifts the ribbons' hue
+    const H = AL.HUE_FOLLOW;
+    const mh = perf.voices.melody.conf > 0.2 || perf.source !== 'score' ? perf.voices.melody.height : 0.5;
+    a.hue += (H.AMOUNT * a.sec.COLOUR * (2 * clamp01(mh) - 1) * presence - a.hue) * (jumped ? 1 : 1 - Math.exp(-dt / H.TIME));
   }
 
   // ------------------------------------------------------------ noise reduction
@@ -527,6 +788,15 @@ export default class Scene2Aurora extends SceneBase {
       uShipLight: { value: lin(LK.SHIP.LIGHT) },
       uGrade: v4(),
       uLift: { value: seen(LK.GRADE.LIFT) },
+      uCloudGlow: { value: 0 },
+      uStarRot: { value: new THREE.Vector3() },
+      // the mist (PROFILE.MIST)
+      uMist: v4(),
+      uMistClock: v4(),
+      uMistLayer: { value: Array.from({ length: 4 }, () => new THREE.Vector4()) },
+      uMistShape: { value: Array.from({ length: 4 }, () => new THREE.Vector4()) },
+      uMistBase: { value: seen(MI.BASE_COLOR) },
+      uMistStar: { value: seen(MI.STARLIGHT) },
     };
   }
 
@@ -552,15 +822,15 @@ export default class Scene2Aurora extends SceneBase {
   }
 
   /**
-   * Onset rings on the water: strong notes (either voice), at most MAX at a time and
-   * MIN_GAP apart, each a soft swell running outward from a random spot of the far water.
+   * Onset rings on the water: accents (the strongest onsets, ALIVE.ACCENT), at most MAX at a
+   * time and MIN_GAP apart, each a soft swell running outward from a random spot of the far water.
    */
-  _updateRings(dt, perf) {
+  _updateRings(dt) {
     const G = LK.WATER.ONSET_RINGS;
     for (const r of this.rings) r.age += dt;
     this.rings = this.rings.filter((r) => r.age < G.LIFE);
-    const strong = [...perf.voices.melody.events, ...perf.voices.low.events].reduce((m, e) => Math.max(m, e.strength), 0);
-    if (strong >= G.MIN_STRENGTH && this.realTime - this.lastRing > G.MIN_GAP && this.rings.length < G.MAX) {
+    const strong = this.alive.accentRing;
+    if (strong > 0 && this.realTime - this.lastRing > G.MIN_GAP && this.rings.length < G.MAX) {
       this.lastRing = this.realTime;
       // a spot on the water plane (one unit below the eye): x across, z into the distance
       this.rings.push({ x: (this._rand() - 0.5) * 6, z: 3 + this._rand() * 6, age: 0, amp: strong });
@@ -575,6 +845,35 @@ export default class Scene2Aurora extends SceneBase {
         u[i].set(r.x, r.z, r.age * G.SPEED, G.AMP * r.amp * env * this.reflectOn);
       }
     }
+  }
+
+  /** × each layer's wave speed: the clock's speed and the intensity's WAVE range. */
+  _waveSpeed() {
+    return this.alive.speed * react(AL.RANGE.WAVE, this.alive.x, AL.REACTIVITY);
+  }
+
+  /**
+   * The mist (PROFILE.MIST): 4 layers drifting on the sky clock at their own speeds, the shapes
+   * rolling with it; the glow follows the bass, the aurora's brightness, the climax and the accents,
+   * the billowing (gently) the mid range. M fades it out and in.
+   */
+  _writeMist(dt) {
+    const u = this.landMat.uniforms;
+    const al = this.alive;
+    const M = MI.MUSIC;
+    this.mistOn += (this.mistTarget - this.mistOn) * (1 - Math.exp(-dt / 0.4));
+    const glow = 1 + M.BASS * this.smooth.bass + M.AURORA * Math.min(2, al.gain) + M.CLIMAX * this.climax + M.ACCENT * al.glow.v;
+    u.uMist.value.set(this.mistOn, MI.COVER, MI.SOFT, MI.WARP * (1 + M.MID * this.smooth.mid));
+    u.uMistClock.value.set(al.clock * MI.ROLL, glow, MI.OVERHEAD, MI.TINT);
+    const octaves = Math.max(1, MI.OCTAVES - (this.quality >= 2 ? 1 : 0));
+    al.mist = MI.LAYERS.map((L, i) => {
+      const offset = al.clock * L.SPEED;
+      u.uMistLayer.value[i].set(L.BASE, L.TOP, L.OPACITY, offset);
+      u.uMistShape.value[i].set(L.SCALE, L.STRETCH, octaves, MI.REFLECT);
+      return offset;
+    });
+    u.uMistBase.value.copy(seen(MI.BASE_COLOR));
+    u.uMistStar.value.copy(seen(MI.STARLIGHT));
   }
 
   /** The look's per-frame values: the curtains in perspective, sky, clouds, mountains, water, ship, grade. */
@@ -598,24 +897,39 @@ export default class Scene2Aurora extends SceneBase {
     // the curtains: vanishing point, the loop (forming and unravelling), the climax fan
     const au = this.auroraMat.uniforms;
     const pal = this._pal();
+    // more alive: the clock drives every motion; the intensity widens the spread, the colour and the fan
+    const al = this.alive;
+    const Rx = AL.REACTIVITY;
+    const MO = AL.MOTION;
+    const clock = al.clock;
+    const tau = 2 * Math.PI;
     au.uRowZ.value.set(...R.DEPTH);
-    au.uVp.value.set(CU.VP[0], CU.VP[1], CU.SPREAD, CU.BEND);
+    au.uVp.value.set(CU.VP[0], CU.VP[1], CU.SPREAD * react(AL.RANGE.WIDTH, al.x, Rx), CU.BEND);
     const L = CU.CURL;
-    au.uCurl.value.set(L.X, L.Y, L.TWIST * (1 + L.SWAY * Math.sin(2 * Math.PI * L.RATE * t)), L.RADIUS);
+    // the loop forms and unravels: its twist sways from almost none to twice the resting twist
+    au.uCurl.value.set(L.X, L.Y, L.TWIST * (1 + Math.min(MO.CURL_MAX, L.SWAY * MO.CURL * al.move) * Math.sin(tau * MO.CURL_RATE * clock)), L.RADIUS);
     au.uBillow.value.set(0, CU.BILLOW_FREQUENCY, 0, CU.EDGE_ON);
-    const sat = lerp(pal.SATURATION[0], pal.SATURATION[1], this.amp);
-    au.uRays.value.set(CU.FAN * this.climax, R.FADE, 0, sat);
+    // sway of each ribbon (amplitude, phase) and the whole system's slow turn around the vanishing point
+    au.uMove.value.set(MO.SWAY * al.move, MO.ROTATE * Math.min(1.5, al.move) * Math.sin(tau * MO.ROTATE_RATE * clock), tau * MO.SWAY_RATE * clock, 0);
+    const sat = Math.min(1.7, lerp(pal.SATURATION[0], pal.SATURATION[1], this.amp) * react(AL.RANGE.SATURATION, al.x, Rx));
+    const fan = Math.min(0.5, CU.FAN * this.climax + lerp(MO.FAN[0], MO.FAN[1], al.x) + MO.KICK_FAN * al.kick.v);
+    au.uRays.value.set(fan, R.FADE, 0, sat);
     au.uTex.value.set(R.TEXTURE.CONTRAST, R.TEXTURE.FREQUENCY, R.TEXTURE.ALONG, CU.GAIN * pal.GAIN);
     au.uGlowShape.value.set(CU.CONVERGE, CU.LEFT_FADE, CU.LOW_GAIN, 0);
     au.uColour.value.set(pal.ZONE, pal.FRINGE_AMOUNT, pal.CORE_AMOUNT, 0);
-    // the ribbons: loudness shows them (3 quiet .. 6 loud), each drifting and billowing at its own pace
+    // the ribbons: loudness shows them (3 quiet .. 6 loud) up to the section's count; each travels
+    // there and back along the sky and billows at its own pace; strong low notes swell and lift the
+    // lower ones (rows 2-3); the melody's pitch shifts their hue
+    const SW = AL.SWELL;
     LK.RIBBONS.forEach((rb, i) => {
-      const show = clamp01((this.amp - rb.SHOW) / 0.12);
-      this.ribbonShow[i] += (show * show * (3 - 2 * show) - this.ribbonShow[i]) * k(0.8);
-      const drift = rb.SHIFT ? ((rb.SHIFT * 120) / (2 * Math.PI)) * Math.sin((2 * Math.PI * t) / 120) : 0; // there and back over 2 min
-      au.uRib.value[i].set(rb.EDGE, rb.TILT, rb.FLAT, rb.LENGTH);
-      au.uRib2.value[i].set(rb.ROW, rb.HUE, drift, rb.BRIGHT * this.ribbonShow[i]);
-      au.uRib3.value[i].set(rb.BILLOW, this.time * rb.RATE + i * 11.3, rb.EDGE_SOFT, 0);
+      // (the first ribbons, SHOW 0, never go out: quiet is calm, never empty)
+      const show = (rb.SHOW > 0 ? smooth01((al.x - rb.SHOW) / 0.12) : 1) * clamp01(al.sec.RIBBONS - i);
+      this.ribbonShow[i] += (show - this.ribbonShow[i]) * k(0.8);
+      const drift = ((rb.SHIFT * MO.DRIFT * MO.DRIFT_PERIOD) / tau) * Math.sin((tau * clock) / MO.DRIFT_PERIOD + i * 1.3);
+      const low = rb.ROW >= 2 ? al.swell.v : 0;
+      au.uRib.value[i].set(rb.EDGE - SW.RISE * low, rb.TILT, rb.FLAT, rb.LENGTH * (1 + SW.GROW * low));
+      au.uRib2.value[i].set(rb.ROW, rb.HUE + al.hue * (rb.ROW >= 2 ? 0.5 : 1), drift, rb.BRIGHT * this.ribbonShow[i] * (1 + SW.GAIN * low));
+      au.uRib3.value[i].set(rb.BILLOW * MO.BILLOW * al.move, this.time * rb.RATE + i * 11.3, rb.EDGE_SOFT, 0);
     });
     this.curtainMat.uniforms.uRowZ.value.set(...R.DEPTH);
     u.uStreak.value.set(CU.VP[0], CU.VP[1], this.clean ? R.STREAK : 0, 0);
@@ -627,12 +941,16 @@ export default class Scene2Aurora extends SceneBase {
     u.uGapCol.value.copy(seen(LK.SKY.GAP.COLOR));
     u.uHazeCol.value.copy(seen(LK.SKY.HAZE.COLOR));
     u.uStarLook.value.set(LK.STARS.DENSITY, LK.STARS.SIZE, LK.STARS.BEHIND_AURORA, 0);
-    // clouds: faint wisps drifting per bank (the warm rims are off in this look: RIM_STRENGTH 0)
+    // the stars wheel slowly around a pole above the frame, on the sky clock
+    u.uStarRot.value.set(clock * AL.STARS.ROTATION, AL.STARS.POLE[0], AL.STARS.POLE[1]);
+    // clouds: dark wisps drifting left -> right with the mist (the warm rims are off in this look: RIM_STRENGTH 0)
     u.uCloud.value.set(this.cloudsOn, C.SCALE, C.COVER + (1 - this.cloudsOn) * 0.6, C.SOFT);
     u.uCloud2.value.set(C.SIDES[0], C.SIDES[1], C.BAND[0], C.BAND[1]);
     u.uCloud3.value.set(C.AURORA_TINT, C.RIM_STRENGTH * (1 + C.BASS_GAIN * bass + C.DAWN_GAIN * this.dawn) * this.cloudsOn, C.RIM_WIDTH, C.OPACITY);
     u.uCloudStretch.value = C.STRETCH;
-    u.uCloudLight.value.set(C.LIGHT[0], C.LIGHT[1], t * C.DRIFT[0] * C.SCALE, -t * C.DRIFT[1] * C.SCALE);
+    u.uCloudLight.value.set(C.LIGHT[0], C.LIGHT[1], -clock * C.DRIFT[0] * C.SCALE, -clock * C.DRIFT[1] * C.SCALE);
+    u.uCloudGlow.value = C.EDGE_GLOW * this.cloudsOn;
+    this._writeMist(dt);
     u.uCloudBody.value.copy(seen(C.BODY));
     u.uCloudRim0.value.copy(lin(C.RIM[0]));
     u.uCloudRim1.value.copy(lin(C.RIM[1]));
@@ -650,7 +968,7 @@ export default class Scene2Aurora extends SceneBase {
     u.uReflect.value.set(W.REFLECT[0] * this.reflectOn, W.BLUR[0], W.BLUR[1], W.SPEED);
     u.uReflect2.value.set(W.REFLECT[1] * this.reflectOn, W.FRESNEL, W.WOBBLE, W.STARS);
     u.uReflect3.value.set(W.GLOW, W.SHORE, W.ONSET_RINGS.WIDTH, 0);
-    this._updateRings(dt, perf);
+    this._updateRings(dt);
     u.uReach.value = W.REACH;
     // the ship: a very slow drift across the fjord (piece time, so a seek puts it in place), bob, roll, billow
     const minutes = (perf.source === 'score' ? perf.t : t % 360) / 60;
@@ -797,7 +1115,8 @@ export default class Scene2Aurora extends SceneBase {
     const S = AU.SCALE;
     const k = (tau) => (jumped ? 1 : 1 - Math.exp(-dt / tau));
     this.keyBias += ((AU.KEY_BIAS[perf.key?.mode] ?? 0) - this.keyBias) * k(AU.KEY_SMOOTHING);
-    const speedScale = lerp(S.SPEED[0], S.SPEED[1], this.amp);
+    // the waves travel with the clock (0.45x .. ~3x) and faster still when loud
+    const speedScale = this._waveSpeed();
     for (const name of LAYERS) {
       const L = AU[name.toUpperCase()];
       const layer = this.layers[name];
@@ -849,7 +1168,9 @@ export default class Scene2Aurora extends SceneBase {
     if (name === 'melody') {
       // around the palette's centre, the climax opening up the whole ramp
       const pal = this._pal();
-      hue = clamp01(pal.HUE_CENTRE + (hue - pal.HUE_CENTRE) * lerp(pal.HUE_SPREAD[0], pal.HUE_SPREAD[1], this.climax));
+      // (louder and more colourful sections open the range wider)
+      const spread = lerp(pal.HUE_SPREAD[0], pal.HUE_SPREAD[1], this.climax) * react(AL.RANGE.HUE, this.alive.x, AL.REACTIVITY) * this.alive.sec.COLOUR;
+      hue = clamp01(pal.HUE_CENTRE + (hue - pal.HUE_CENTRE) * Math.min(1.3, spread));
       if (e.strength > 0.6) this.rippleKick = Math.min(1, this.rippleKick + 0.5 * e.strength);
     }
     const p = {
@@ -894,7 +1215,9 @@ export default class Scene2Aurora extends SceneBase {
           v.set(0, 0, 0, 0.05);
           continue;
         }
-        v.set(p.x, p.curtain, p.strength * this._envelope(p, L) * layer.on, this._width(p, L));
+        // (each melody note's wave sets off with a bright pulse: ALIVE.KICK.PULSE)
+        const pulse = name === 'melody' ? 1 + AL.KICK.PULSE * (AL.REACTIVITY / 1.5) * Math.exp(-p.age / AL.KICK.PULSE_TIME) : 1;
+        v.set(p.x, p.curtain, p.strength * this._envelope(p, L) * layer.on * pulse, this._width(p, L));
         q.set(p.hue, p.lift, L.DIRECTION * L.FRONT, 0);
       }
     });
@@ -938,6 +1261,18 @@ export default class Scene2Aurora extends SceneBase {
     return '#' + c.getHexString();
   }
 
+  /**
+   * The alive state for the verify script: intensity, the aurora's brightness gain (the same product
+   * aurora.frag applies: energy, bass, surge, the music gain, the light gain), speed, clocks, kicks,
+   * mist offsets, ribbons and the wave speed.
+   */
+  get aliveState() {
+    const a = this.alive;
+    const s = this.shared;
+    const bright = (0.8 + 0.5 * s.uEnergy.value) * (1 + 0.25 * s.uBass.value) * (1 + 0.4 * s.uSurge.value) * s.uBright.value * this.auroraMat.uniforms.uTex.value.w;
+    return { x: a.x, bright, gain: a.gain, speed: a.speed, clock: a.clock, sky: a.clock, kick: a.kick.v, swell: a.swell.v, glow: a.glow.v, mist: a.mist ?? [0, 0, 0, 0], ribbons: this.ribbonShow.filter((v) => v > 0.5).length, ribbonSpeed: AU.MELODY.SPEED * this._waveSpeed(), section: a.role, reactivity: AL.REACTIVITY };
+  }
+
   /** Aurora state for the verify script. */
   get auroraState() {
     const layer = (name) => {
@@ -952,7 +1287,7 @@ export default class Scene2Aurora extends SceneBase {
         // visible wave energy: strength x envelope x size x brightness (incl. the quiet/loud scaling)
         activity: l.packets.reduce((s, p) => s + p.strength * this._envelope(p, L) * p.size, 0) * L.BRIGHT * lerp(AU.SCALE.BRIGHT[0], AU.SCALE.BRIGHT[1], this.amp),
         packets: l.packets.map((p) => ({ id: p.id, x: p.x, env: this._envelope(p, L), width: this._width(p, L) })),
-        speed: L.SPEED * lerp(AU.SCALE.SPEED[0], AU.SCALE.SPEED[1], this.amp),
+        speed: L.SPEED * this._waveSpeed(),
       };
     };
     const v = this.perfVoices;
@@ -987,7 +1322,7 @@ export default class Scene2Aurora extends SceneBase {
     const onOff = (l, key) => (l.onTarget > 0 ? '' : ` OFF (${key})`);
     const v = perf?.voices;
     return {
-      aurora: `${this.onTarget > 0 ? 'on' : 'OFF (A)'} · amp ${this.amp.toFixed(2)} · packets low ${low.packets.length}/${AU.LOW.POOL}${onOff(low, 'L')} · melody ${mel.packets.length}/${AU.MELODY.POOL}${onOff(mel, 'M')}`,
+      aurora: `${this.onTarget > 0 ? 'on' : 'OFF (A)'} · amp ${this.amp.toFixed(2)} · packets low ${low.packets.length}/${AU.LOW.POOL}${onOff(low, 'L')} · melody ${mel.packets.length}/${AU.MELODY.POOL}${onOff(mel, 'K')}`,
       melody: { html: `${sw(this._rampHex(AU.MELODY.RAMP, mel.hue, mel.rot))} height ${(v?.melody.height ?? 0).toFixed(2)} · hue ${mel.hue.toFixed(2)} · ${(v?.melody.rate ?? 0).toFixed(1)} notes/s · spawned ${mel.spawned}/${mel.heard}` },
       'low note': { html: `${sw(this._rampHex(AU.LOW.RAMP, low.hue, low.rot))} ${v && v.low.note >= 0 ? names[v.low.note] : '-'} · height ${(v?.low.height ?? 0).toFixed(2)} · ${(v?.low.rate ?? 0).toFixed(1)} notes/s · spawned ${low.spawned}/${low.heard}` },
       voices: perf ? { html: this._voiceStrip(perf) + ' <span style="color:#b98cff">melody</span> / <span style="color:#2fd39a">low</span>' } : '-',
@@ -995,7 +1330,10 @@ export default class Scene2Aurora extends SceneBase {
       look: `clouds ${this.cloudsTarget > 0 ? 'on' : 'OFF'} (C) · ship ${this.shipTarget > 0 ? 'on' : 'OFF'} (B) · VP ${LK.CURTAINS.VP.join(', ')} · loop twist ${this.auroraMat.uniforms.uCurl.value.z.toFixed(2)} · sat ${this.auroraMat.uniforms.uRays.value.w.toFixed(2)} · streak ${LK.RAYS.STREAK} px · reflection ${LK.WATER.REFLECT}`,
       smoothness: `${this.clean ? 'clean' : 'PREVIOUS look'} (N) · audio jitter ${(this.jitterIn * 1000).toFixed(1)} -> ${(this.jitterOut * 1000).toFixed(1)} ‰/frame (${this.jitterIn > 0 ? Math.round((1 - this.jitterOut / this.jitterIn) * 100) : 0} % less) · blur ${this.landMat.uniforms.uAuroraBlur.value.x} px · rays ${this.curtainMat.uniforms.uRay.value.x} oct`,
       night: { html: `${sw(this._horizonHex())} night ${this.night.toFixed(2)} · dawn ${this.dawn.toFixed(2)} · ${this.nightSource === 'score' ? 'timeline' : `loop ${NI.LOOP} s`}` },
-      'speed ×': this.speed.toFixed(2),
+      alive: `reactivity ${AL.REACTIVITY.toFixed(2)} ([ ]) · x ${this.alive.x.toFixed(2)} · speed ×${this.alive.speed.toFixed(2)} · brightness ${(this.alive.gain ?? 0).toFixed(2)} · ribbons ${this.ribbonShow.filter((v) => v > 0.5).length}`,
+      section: `${this.perf?.section?.role ?? this.perf?.stage ?? '-'} → move ${this.alive.sec.MOVE.toFixed(2)} · ribbons ≤ ${this.alive.sec.RIBBONS.toFixed(1)} · ceiling ${this.alive.sec.BRIGHT.toFixed(2)} · colour ${this.alive.sec.COLOUR.toFixed(2)}`,
+      reactions: `kick ${this.alive.kick.v.toFixed(2)} · swell ${this.alive.swell.v.toFixed(2)} · accent glow ${this.alive.glow.v.toFixed(2)} · hue ${this.alive.hue >= 0 ? '+' : ''}${this.alive.hue.toFixed(2)}`,
+      mist: `${this.mistTarget > 0 ? 'on' : 'OFF'} (M) · speed ${MI.LAYERS.map((L) => (L.SPEED * this.alive.speed).toFixed(3)).join(' / ')} screen h/s · clock ${this.alive.clock.toFixed(1)}`,
       build: `${this.build.toFixed(2)} · climax ${this.climax.toFixed(2)} · exposure ${this.exposure.toFixed(2)}`,
       curtains: `height ${sh.height.toFixed(2)} · width ${sh.width.toFixed(2)} · fold ${sh.fold.toFixed(2)}`,
     };
