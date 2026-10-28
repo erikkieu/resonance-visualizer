@@ -190,19 +190,17 @@ The landscape (cypress sway, hills and village with lit windows) is part of the 
 
 On portrait screens the painting is centre-cropped instead of squeezed.
 
-### 4 · Stockholm (`Scene4Stockholm.js`, `shaders/stockholm/street.frag`)
+### 4 · Stockholm (`Scene4Stockholm.js`, `scenes/stockholm/sepiaStreet.js`)
 
-A single ray-cast shader. It casts rays against the ground, two receding neoclassical facades and a far row of buildings with a clock tower (the clock shows your local time). Trams, cars, pedestrians (with a walk cycle and canes or umbrellas), lamps and bare trees are 2D silhouettes on vertical planes at fixed depths. That gives true perspective and parallax, with a per-pixel depth test sorting them. The scene also has cobblestones, rails, overhead wires and soft contact shadows.
+"Stockholm i sepia": a street opening onto Riddarfjärden and Stadshuset, drawn like an old sepia film in a 2:1 frame with rounded corners inside a dark projection room. Walkers in top hats, bowlers, caps and with umbrellas stroll along the pavements and across the quay, tram No. 7 runs along the water, a steamboat with a smoking funnel crosses Riddarfjärden, gulls drift over the water and the city is mirrored in it.
 
-The film treatment covers:
-- sepia-tinted monochrome
-- grain, flicker and gate weave
-- scratches that persist for a few frames, plus dust and hairs
-- vignette and rounded gate corners
+The scene is drawn with Canvas 2D: the static layers (sky, Stadshuset, the quay, the street walls, the vignette) are drawn once per size, the moving parts every frame, and the result is shown as a texture. The film treatment covers:
+- sepia-toned monochrome
+- light flicker and projector jitter
+- scratches that persist for a few seconds, plus dust and hairs
+- film grain
 
-Motion and film artefacts step at 18 fps, and the scene only re-renders when a new film frame starts.
-
-**Optional photo plate:** put an image in `public/textures/` (for example `stockholm.jpg`) and it becomes the background plate, with the trams, cars and people layered over it. Images there are discovered at dev/build time through a tiny Vite plugin (`vite.config.js`), so nothing is fetched speculatively. That folder is git-ignored because photos are often copyrighted (the public-domain Starry Night is the only exception), so the published site always renders the street procedurally.
+The music keeps it gentle: louder passages make everything move a little faster, bass strengthens the flicker and jitter, treble adds dust, scratches and grain, and beats brighten the frame for a moment.
 
 ### 5 · Galaxy (`Scene5Galaxy.js`, `shaders/galaxy/`)
 
