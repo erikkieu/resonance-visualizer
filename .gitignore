@@ -37,8 +37,8 @@ public/textures/*
 # The Starry Night (Van Gogh, 1889) is public domain: the reference for scene 2
 !public/textures/starry-night.jpg
 # Scene 3's other paintings, also public domain: Vermeer (c. 1665), Turner
-# (1839), Monet (1872) and Hokusai (c. 1831)
+# (1839) and Monet (1872, 1873)
 !public/textures/girl-with-a-pearl-earring.jpg
 !public/textures/fighting-temeraire.jpg
 !public/textures/impression-sunrise.jpg
-!public/textures/great-wave.jpg
+!public/textures/poppy-field.jpg

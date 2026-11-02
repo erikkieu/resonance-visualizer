@@ -64,7 +64,7 @@ import finalFrag from '../shaders/starry/final.frag?raw';
  * the moment after a seek). Without the analysis the live loudness paints it.
  *
  * Since 2026-11-02 it is a gallery (CONFIG.GALLERY): four more paintings
- * (Vermeer, Turner, Monet, Hokusai) paint themselves the same way before
+ * (Vermeer, Turner and two Monets) paint themselves the same way before
  * it, ~45 s each, fading to black in between; the Starry Night comes last and
  * is still finished at the main climax. Each painting has its own reference,
  * mask, rank map and stroke ranks (_loadGallery, _usePainting); the piece is
@@ -148,7 +148,7 @@ const CONFIG = {
   // 16:10 screens show, pre-squeezed by FIT_STRETCH so they keep their
   // proportions, on a dark WALL. They have no spirals, stars or moon; their
   // painter's order is lightness (`order`: dark-first like an oil painting,
-  // light-first like the woodblock print) in patches, with the fine detail
+  // 'light' = light-first) in patches, with the fine detail
   // (local contrast above `detail`) last, in small still strokes along the edges.
   GALLERY: {
     PAINTINGS: [
@@ -157,7 +157,8 @@ const CONFIG = {
       // (replaced the Mona Lisa and Monet's water lily pond, user 2026-11-02)
       { file: 'fighting-temeraire.jpg', name: 'The Fighting Temeraire', order: 'dark', ground: '#6a5034', primer: '#3a2c1c', detail: [0.04, 0.11], extend: 'mirror' },
       { file: 'impression-sunrise.jpg', name: 'Impression, Sunrise', order: 'dark', ground: '#5a6a70', primer: '#2e3438', detail: [0.04, 0.11], extend: 'mirror' },
-      { file: 'great-wave.jpg', name: 'The Great Wave', order: 'light', ground: '#d2bd9c', primer: '#8a7a60', detail: [0.05, 0.13], extend: 'mirror' },
+      // (replaced Hokusai's Great Wave, user 2026-11-02)
+      { file: 'poppy-field.jpg', name: 'Poppy Field', order: 'dark', ground: '#7a8a6a', primer: '#3a4030', detail: [0.04, 0.11], extend: 'mirror' },
       { starry: true, name: 'The Starry Night' },
     ],
     V: [0.12, 0.97], // painting-space height band the others are fitted into (what 16:9 shows: full height)
