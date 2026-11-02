@@ -36,6 +36,7 @@ uniform float uTintAmount;
 uniform vec3 uStars[12];    // x, y, radius (the last one is the moon)
 uniform float uPulse[12];   // onset pulses per star
 uniform vec2 uMoon;         // moon centre incl. the melody lift
+uniform float uShow;        // 1 = shown, 0 = black (the gallery fades between paintings)
 varying vec2 vUv;
 
 void main() {
@@ -102,7 +103,7 @@ void main() {
 
   // --- vignette
   vec2 q = vUv - 0.5;
-  col *= 1.0 - 0.38 * dot(q, q) * 1.6;
+  col *= (1.0 - 0.38 * dot(q, q) * 1.6) * uShow;
 
   gl_FragColor = vec4(max(col, 0.0), 1.0);
 }

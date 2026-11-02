@@ -14,6 +14,11 @@ uniform vec4 uSpire;        // u0, u1 at the base, base v, tip v
 uniform vec4 uTower;        // u0, u1, v0, v1
 uniform vec4 uNave;         // u0, u1, v0, v1 (walls)
 uniform float uGable;       // v of the nave's gable peak
+// the gallery's other paintings (uGeneric 1): no cypress, land or lights;
+//   g = the wall around the painting (outside uFrame), a = fine detail (still, painted on top)
+uniform float uGeneric;
+uniform vec4 uFrame;        // the painting's rect: u0, v0, u1, v1
+uniform vec2 uDetail;       // local contrast (fine vs blurred lightness) that counts as detail
 varying vec2 vUv;
 
 float horizon(float u) {
@@ -42,6 +47,13 @@ float buildings(vec2 p) {
 }
 
 void main() {
+  if (uGeneric > 0.5) {
+    float inside = step(uFrame.x, vUv.x) * step(vUv.x, uFrame.z) * step(uFrame.y, vUv.y) * step(vUv.y, uFrame.w);
+    float fine = luma(pow(textureLod(tRef, refUV(vUv), 1.0).rgb, vec3(1.0 / 2.2)));
+    float soft = luma(pow(textureLod(tRef, refUV(vUv), 4.0).rgb, vec3(1.0 / 2.2)));
+    gl_FragColor = vec4(0.0, 1.0 - inside, 0.0, smoothstep(uDetail.x, uDetail.y, abs(fine - soft)) * inside);
+    return;
+  }
   vec3 c = pow(texture2D(tRef, refUV(vUv)).rgb, vec3(1.0 / 2.2)); // approx sRGB for colour tests
   float lum = dot(c, vec3(0.299, 0.587, 0.114));
   float cypress = smoothstep(0.3, 0.2, lum) * step(c.b, max(c.r, c.g) * 1.25) * smoothstep(0.5, 0.44, vUv.x) * step(vUv.y, 0.97);

@@ -14,6 +14,7 @@ uniform float uTurbulence;
 uniform float uStarSwirl;
 uniform float uMoonSwirl;
 uniform float uFlowGain;    // painting heights per second for unit flow
+uniform float uWind;        // × the wind current (the gallery's other paintings drift less)
 varying vec2 vUv;
 
 // Compact Gaussian vortex: tangential flow near c, none far away
@@ -25,7 +26,7 @@ float vortex(vec2 p, vec2 c, float r, float s) {
 float streamFunction(vec2 p) {
   float s = 0.0;
   // the wind current: left to right across the sky, in long waves
-  s += 0.35 * p.y + 0.12 * sin(p.x * 2.4 - 0.6 + p.y * 2.0);
+  s += uWind * (0.35 * p.y + 0.12 * sin(p.x * 2.4 - 0.6 + p.y * 2.0));
   s += vortex(p, uSpirals[0].xy, uSpirals[0].z, uSpirals[0].w);
   s += vortex(p, uSpirals[1].xy, uSpirals[1].z, uSpirals[1].w);
   for (int i = 0; i < 12; i++) s += vortex(p, uStars[i].xy, uStars[i].z * 1.7, i == 11 ? uMoonSwirl : uStarSwirl);

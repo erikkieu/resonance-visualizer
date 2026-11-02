@@ -63,6 +63,13 @@ import finalFrag from '../shaders/starry/final.frag?raw';
  * painting), so seeking and pausing are safe (the wet canvas snaps to
  * the moment after a seek). Without the analysis the live loudness paints it.
  *
+ * Since 2026-11-02 it is a gallery (CONFIG.GALLERY): four more paintings
+ * (Vermeer, Turner, Monet, Hokusai) paint themselves the same way before
+ * it, ~45 s each, fading to black in between; the Starry Night comes last and
+ * is still finished at the main climax. Each painting has its own reference,
+ * mask, rank map and stroke ranks (_loadGallery, _usePainting); the piece is
+ * split into equal windows from the first note to that finish (_prepareReveal).
+ *
  * Keys: [ ] reactivity (also a slider in the D overlay); Shift+P replays the
  * painting from black (the piece restarts; P itself plays / pauses the piece);
  * K skips to the finished painting. Both are buttons in the D overlay too.
@@ -133,10 +140,55 @@ const CONFIG = {
   ],
 
   BURSTS: { COUNT: 24, STROKES: 96, LIFE: 2.5 }, // onset bloom capacity
+
+  // The gallery (user, 2026-11-02): five paintings paint themselves one after
+  // another, the same way, ~45 s each; the Starry Night last, so it is still
+  // finished at the main climax. The others are laid into the same painting
+  // space (the Starry Night's shape): fitted inside the band V that 16:9 and
+  // 16:10 screens show, pre-squeezed by FIT_STRETCH so they keep their
+  // proportions, on a dark WALL. They have no spirals, stars or moon; their
+  // painter's order is lightness (`order`: dark-first like an oil painting,
+  // light-first like the woodblock print) in patches, with the fine detail
+  // (local contrast above `detail`) last, in small still strokes along the edges.
+  GALLERY: {
+    PAINTINGS: [
+      // (the portrait is a small scan, 330 px wide: a lower detail threshold keeps the face still)
+      { file: 'girl-with-a-pearl-earring.jpg', name: 'Girl with a Pearl Earring', order: 'dark', ground: '#1e1810', primer: '#2a2016', detail: [0.02, 0.07], extend: 'edge' },
+      // (replaced the Mona Lisa and Monet's water lily pond, user 2026-11-02)
+      { file: 'fighting-temeraire.jpg', name: 'The Fighting Temeraire', order: 'dark', ground: '#6a5034', primer: '#3a2c1c', detail: [0.04, 0.11], extend: 'mirror' },
+      { file: 'impression-sunrise.jpg', name: 'Impression, Sunrise', order: 'dark', ground: '#5a6a70', primer: '#2e3438', detail: [0.04, 0.11], extend: 'mirror' },
+      { file: 'great-wave.jpg', name: 'The Great Wave', order: 'light', ground: '#d2bd9c', primer: '#8a7a60', detail: [0.05, 0.13], extend: 'mirror' },
+      { starry: true, name: 'The Starry Night' },
+    ],
+    V: [0.12, 0.97], // painting-space height band the others are fitted into (what 16:9 shows: full height)
+    WALL: '#060606', // (only without the extension)
+    // the background is extended to fill the screen (user, same day: "the paintings should fill the
+    // whole screen; try extending their background"): outside the painting the plate continues it,
+    // blurred more with distance (mip EXTEND.BLUR + distance × GROW) and dimmed a little (DIM):
+    // mirrored at the edges (`extend: 'mirror'`, the landscapes) or the edge drawn outward
+    // ('edge', the portraits: a mirror put ghost copies of the sitter at the sides)
+    EXTEND: { ON: true, BLUR: 2.5, GROW: 9, DIM: 0.85 },
+    // pace (user, same day: "too fast, a minute per painting"): the windows run from the first note to
+    // the end of the music (not the main climax: 5 × 48 s is the most 4:01 allows), each painting is
+    // finished HOLD + FADE s before its window ends, and STEADY evens the loudness-driven rate toward
+    // its mean (0 = as loud as the music, 1 = constant), so the loud opening doesn't rush it
+    TO_MUSIC_END: true,
+    END_MARGIN: 1.5, // s before the music ends that the last painting is finished
+    STEADY: 0.6,
+    HOLD: 2, // s a finished painting is shown before ...
+    FADE: 1.5, // ... it fades to black and the next one begins
+    FLOW: 0.35, // × flow speed on the others (a face shouldn't smear; 0.6 smeared the Mona Lisa)
+    WIND: 0.25, // × the Starry Night's left-to-right wind current on the others
+    COOL: 0.5, // × the night-blue grade on the others
+    LUMA: 0.6, // weight of lightness (vs patches) in their painter's order
+    STAGES: { GROUND: [0, 0.25], BODY: [0, 0.8], DETAIL: [0.45, 1] }, // their painter's order, in coverage
+    LIVE: 60, // s per painting at a typical loudness without the analysis (mic, other files)
+  },
 };
 // ============================================================================
 
 const STATE_WIDTH = Math.ceil(Math.sqrt(CONFIG.STROKES.MAX));
+const PAINTINGS = CONFIG.GALLERY.PAINTINGS;
 const INV_BINS = 2048; // coverage -> reveal clock table (the strokes look up when they were painted)
 const RANK_WIDTH = 320; // rank map texels across the painting
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -334,31 +386,49 @@ export default class Scene3StarryNight extends SceneBase {
     const prefix = noiseGLSL + paintGLSL;
     this.stars = C.STARS.map(([u, v, r]) => new THREE.Vector3(u * P, v, r)).concat([new THREE.Vector3(C.MOON[0] * P, C.MOON[1], C.MOON[2])]);
 
-    // --- reference analysis (cypress / landscape / light), mipmapped for soft glows
+    // --- the gallery's references, and for each its analysis (cypress / landscape / light,
+    // or wall / detail for the others), mipmapped for soft glows
+    this.gallery = await this._loadGallery();
     const maskH = 512;
-    this.maskRT = new THREE.WebGLRenderTarget(Math.round(maskH * P), maskH, {
-      generateMipmaps: true,
-      minFilter: THREE.LinearMipmapLinearFilter,
-      magFilter: THREE.LinearFilter,
-      depthBuffer: false,
-    });
     const B0 = C.BUILDINGS;
     const maskMat = passMaterial({
       fragmentShader: prefix + maskFrag,
       uniforms: {
         ...paintUniforms(),
-        tRef: { value: this.ref },
+        tRef: { value: null },
         uHorizon: { value: C.HORIZON },
         uVillage: { value: B0.VILLAGE.map(([u, v]) => new THREE.Vector2(u, v)) },
         uSpire: { value: new THREE.Vector4(...B0.SPIRE) },
         uTower: { value: new THREE.Vector4(...B0.TOWER) },
         uNave: { value: new THREE.Vector4(...B0.NAVE) },
         uGable: { value: B0.GABLE },
+        uGeneric: { value: 0 },
+        uFrame: { value: new THREE.Vector4() },
+        uDetail: { value: new THREE.Vector2() },
       },
     });
-    this.pass.render(renderer, maskMat, this.maskRT);
+    for (const pt of this.gallery) {
+      pt.maskRT = new THREE.WebGLRenderTarget(Math.round(maskH * P), maskH, {
+        generateMipmaps: true,
+        minFilter: THREE.LinearMipmapLinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+      });
+      const mu = maskMat.uniforms;
+      mu.tRef.value = pt.ref;
+      mu.uGeneric.value = pt.starry ? 0 : 1;
+      if (!pt.starry) {
+        // (with the extended background there is no wall: the whole plate is painted)
+        if (C.GALLERY.EXTEND.ON) mu.uFrame.value.set(-1, -1, 2, 2);
+        else mu.uFrame.value.copy(pt.frame);
+        mu.uDetail.value.set(...pt.config.detail);
+      }
+      this.pass.render(renderer, maskMat, pt.maskRT);
+      renderer.setRenderTarget(null); // makes three refresh the mask's mipmaps
+    }
     maskMat.dispose();
-    renderer.setRenderTarget(null); // makes three refresh the mask's mipmaps
+    this.maskRT = this.gallery[0].maskRT;
+    this.ref = this.gallery[0].ref;
 
     // --- flow field
     const fw = C.FLOW.RESOLUTION;
@@ -375,6 +445,7 @@ export default class Scene3StarryNight extends SceneBase {
         uStarSwirl: { value: C.FLOW.STAR_SWIRL },
         uMoonSwirl: { value: C.FLOW.MOON_SWIRL },
         uFlowGain: { value: C.FLOW.GAIN },
+        uWind: { value: 1 },
       },
     });
 
@@ -400,7 +471,16 @@ export default class Scene3StarryNight extends SceneBase {
     this.homeTex.needsUpdate = true;
 
     // --- the painter's order: a rank per stroke and a rank map for the canvas; the coverage -> clock table
-    this._buildRanks(renderer, home, n);
+    // (one per painting; the Starry Night's own order reads this.maskRT / this.ref)
+    for (const pt of this.gallery) {
+      if (pt.starry) {
+        [this.maskRT, this.ref] = [pt.maskRT, pt.ref];
+        this._buildRanks(renderer, home, n);
+        Object.assign(pt, { rankTex: this.rankTex, ranks: this.ranks, sortedRanks: this.sortedRanks, starWindows: this.starWindows });
+      } else this._buildRanksGeneric(renderer, home, n, pt);
+    }
+    [this.maskRT, this.ref, this.rankTex, this.ranks] = [this.gallery[0].maskRT, this.gallery[0].ref, this.gallery[0].rankTex, this.gallery[0].ranks];
+    this.paintingIndex = 0;
     this.invTex = new THREE.DataTexture(new Float32Array(INV_BINS).fill(1e9), INV_BINS, 1, THREE.RedFormat, THREE.FloatType);
     this.invTex.needsUpdate = true;
     this._prepareReveal();
@@ -471,7 +551,7 @@ export default class Scene3StarryNight extends SceneBase {
     });
     const q = C.QUALITY[this.quality] ?? C.QUALITY[0];
     const strokeGeo = strokeGeometry(C.STROKES.SEGMENTS, Math.floor(C.STROKES.MAX * q.strokes));
-    strokeGeo.setAttribute('aRank', new THREE.InstancedBufferAttribute(this.ranks, 1));
+    strokeGeo.setAttribute('aRank', new THREE.InstancedBufferAttribute(new Float32Array(this.ranks), 1)); // refilled per painting
     this.strokes = new THREE.Mesh(strokeGeo, this.strokeMat);
     this.strokes.frustumCulled = false;
     // the foreground (buildings, cypress): the same strokes, a second pass on top (shares every uniform but the layer)
@@ -572,11 +652,13 @@ export default class Scene3StarryNight extends SceneBase {
         uStars: { value: this.stars.map((s) => s.clone()) },
         uPulse: { value: new Float32Array(12) },
         uMoon: { value: new THREE.Vector2(this.stars[11].x, this.stars[11].y) },
+        uShow: { value: 1 },
       },
     });
 
     await this.pass.compile(renderer, [this.flowMat, this.stateMat, this.canvasMat, this.copyMat, this.finalMat, this.litMat]);
     await precompile(renderer, this.paintScene, this.camera);
+    this._usePainting(0);
     this.tune = createTunePanel({ title: 'Starry Night · Andante Festivo', storageKey: 'resonance.tune.starry', params: configParams(PROFILE, TUNE), onChange: bindConfig(PROFILE) });
   }
 
@@ -755,6 +837,245 @@ export default class Scene3StarryNight extends SceneBase {
   }
 
   /**
+   * The painter's order of one of the gallery's other paintings (same rank
+   * map and stroke-rank layout as _buildRanks): the wall at once, a patchy
+   * ground (GALLERY.STAGES.GROUND), the body by lightness in patches (dark
+   * first, or light first for the print: `order`), the fine detail last.
+   */
+  _buildRanksGeneric(renderer, home, n, pt) {
+    const G = CONFIG.GALLERY;
+    const S = G.STAGES;
+    const P = this.paintAspect;
+    const w = RANK_WIDTH;
+    const h = Math.round(w / P);
+    const rt = new THREE.WebGLRenderTarget(w, h, { depthBuffer: false });
+    const mat = passMaterial({
+      fragmentShader:
+        paintGLSL +
+        `uniform sampler2D tMask; uniform sampler2D tRef; varying vec2 vUv;
+        void main() { vec3 c = pow(texture2D(tRef, refUV(vUv)).rgb, vec3(1.0 / 2.2)); gl_FragColor = vec4(texture2D(tMask, vUv).rgb, luma(c)); gl_FragColor.b = texture2D(tMask, vUv).a; }`,
+      uniforms: { uAspect: { value: P }, uTrim: { value: this.trim }, tMask: { value: pt.maskRT.texture }, tRef: { value: pt.ref } },
+    });
+    this.pass.render(renderer, mat, rt);
+    const px = new Uint8Array(w * h * 4);
+    renderer.readRenderTargetPixels(rt, 0, 0, w, h, px);
+    renderer.setRenderTarget(null);
+    mat.dispose();
+    rt.dispose();
+
+    const N = w * h;
+    const wall = new Uint8Array(N);
+    const detail = new Uint8Array(N);
+    const key = new Float32Array(N);
+    const ground = new Float32Array(N);
+    const [pc, pf] = PROFILE.REVEAL.PATCH;
+    const patch = (x, y, seed) => 0.65 * valueNoise(x / pc, y / pc, seed) + 0.35 * valueNoise(x / pf, y / pf, seed + 1);
+    const lightFirst = pt.config.order === 'light';
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const X = ((x + 0.5) / w) * P;
+        const v = (y + 0.5) / h;
+        wall[i] = px[i * 4 + 1] > 128 ? 1 : 0;
+        detail[i] = px[i * 4 + 2] > 128 ? 1 : 0;
+        const l = px[i * 4 + 3] / 255;
+        key[i] = G.LUMA * (lightFirst ? 1 - l : l) + (1 - G.LUMA) * patch(X, v, detail[i] ? 8 : 3);
+        ground[i] = patch(X, v, 2);
+      }
+    }
+    const cellsOf = (test) => {
+      const out = [];
+      for (let i = 0; i < N; i++) if (test(i)) out.push(i);
+      return out;
+    };
+    equalise(cellsOf((i) => !wall[i] && !detail[i]), key);
+    equalise(cellsOf((i) => !wall[i] && detail[i]), key);
+    equalise(cellsOf((i) => !wall[i]), ground);
+    const front = new Float32Array(N);
+    const rankPx = new Uint8Array(N * 4);
+    for (let i = 0; i < N; i++) {
+      // (the wall's strokes come last: at its edge they take the painting's colour, and early they'd fringe it)
+      front[i] = wall[i] ? 0.999 : lerp(...(detail[i] ? S.DETAIL : S.BODY), key[i]);
+      const back = wall[i] ? 0 : lerp(...S.GROUND, ground[i]);
+      rankPx[i * 4] = Math.round(front[i] * 255);
+      rankPx[i * 4 + 1] = Math.round(Math.min(back, front[i]) * 255);
+      rankPx[i * 4 + 2] = wall[i] * 255; // the "land" ground of the canvas = the wall
+      rankPx[i * 4 + 3] = 255;
+    }
+    pt.rankTex = new THREE.DataTexture(rankPx, w, h, THREE.RGBAFormat);
+    pt.rankTex.magFilter = THREE.LinearFilter;
+    pt.rankTex.minFilter = THREE.LinearFilter;
+    pt.rankTex.needsUpdate = true;
+    const rnd = mulberry32(11);
+    pt.ranks = new Float32Array(n);
+    for (let k = 0; k < n; k++) {
+      const x = Math.min(w - 1, Math.floor((home[k * 4] / P) * w));
+      const y = Math.min(h - 1, Math.floor(home[k * 4 + 1] * h));
+      const i = y * w + x;
+      pt.ranks[k] = Math.min(0.999, Math.max(0.0002, Math.abs(front[i] + (rnd() - 0.5) * PROFILE.REVEAL.JITTER * (detail[i] ? 0.25 : 1))));
+    }
+    pt.sortedRanks = Float32Array.from(pt.ranks).sort();
+    pt.starWindows = Array.from({ length: 12 }, () => [2, 3]); // no stars: never lit
+  }
+
+  /**
+   * The gallery: the Starry Night (this.ref, already loaded) and the others,
+   * each laid into a plate of the Starry Night's shape (painting space) on the
+   * wall, fitted inside GALLERY.V with its own proportions on screen (painting
+   * space is shown stretched by FIT_STRETCH). A missing image is left out.
+   */
+  async _loadGallery() {
+    const G = CONFIG.GALLERY;
+    const P = this.paintAspect;
+    const list = [];
+    const plate = passMaterial({
+      fragmentShader: `uniform sampler2D tImg; uniform vec4 uFrame; uniform vec4 uTrim; uniform vec3 uWall; uniform vec4 uExtend; uniform float uExtendMode; uniform float uImgAspect; varying vec2 vUv;
+        void main() {
+          vec2 uv = (vUv - uTrim.xy) / uTrim.zw; // painting uv (refUV() maps it back here)
+          vec2 q = (uv - uFrame.xy) / (uFrame.zw - uFrame.xy);
+          float inside = step(0.0, q.x) * step(q.x, 1.0) * step(0.0, q.y) * step(q.y, 1.0);
+          vec3 col = texture2D(tImg, clamp(q, 0.0, 1.0)).rgb;
+          if (uExtend.x > 0.5 && inside < 0.5) {
+            // the extension: the painting mirrored at its edges, blurrier and a little dimmer further out
+            vec2 out_ = max(-q, 0.0) + max(q - 1.0, 0.0);
+            float d = length(out_ * vec2(uImgAspect, 1.0)); // in painting heights
+            // mirror (landscapes) or the edge drawn outward (portraits: a mirror doubles the sitter)
+            vec2 m = abs(q);
+            m = uExtendMode > 0.5 ? clamp(q, 0.0, 1.0) : 1.0 - abs(1.0 - mod(m, 2.0));
+            col = textureLod(tImg, m, uExtend.y + d * uExtend.z).rgb * mix(1.0, uExtend.w, smoothstep(0.0, 0.6, d));
+          } else col = mix(uWall, col, inside);
+          gl_FragColor = vec4(col, 1.0);
+        }`,
+      uniforms: {
+        tImg: { value: null },
+        uFrame: { value: new THREE.Vector4() },
+        uTrim: { value: this.trim },
+        uWall: { value: new THREE.Color(G.WALL) },
+        uExtend: { value: new THREE.Vector4(G.EXTEND.ON ? 1 : 0, G.EXTEND.BLUR, G.EXTEND.GROW, G.EXTEND.DIM) },
+        uImgAspect: { value: 1 },
+        uExtendMode: { value: 0 },
+      },
+    });
+    for (const config of PAINTINGS) {
+      if (config.starry) {
+        list.push({ config, starry: true, ref: this.ref });
+        continue;
+      }
+      if (!plates.includes(config.file)) continue;
+      let img;
+      try {
+        img = await new THREE.TextureLoader().loadAsync(`${import.meta.env.BASE_URL}textures/${config.file}`);
+      } catch {
+        continue;
+      }
+      img.colorSpace = THREE.SRGBColorSpace;
+      const ap = img.image.width / img.image.height;
+      let dv = G.V[1] - G.V[0];
+      let du = (ap * dv) / (CONFIG.FIT_STRETCH * P);
+      if (du > 0.96) {
+        dv *= 0.96 / du;
+        du = 0.96;
+      }
+      const vc = 0.5 * (G.V[0] + G.V[1]);
+      const frame = new THREE.Vector4(0.5 - du / 2, vc - dv / 2, 0.5 + du / 2, vc + dv / 2);
+      const rt = new THREE.WebGLRenderTarget(1280, Math.round(1280 / P), {
+        type: THREE.HalfFloatType,
+        generateMipmaps: true,
+        minFilter: THREE.LinearMipmapLinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+      });
+      plate.uniforms.tImg.value = img;
+      plate.uniforms.uFrame.value.copy(frame);
+      plate.uniforms.uImgAspect.value = ap;
+      plate.uniforms.uExtendMode.value = config.extend === 'edge' ? 1 : 0;
+      this.pass.render(this.renderer, plate, rt);
+      this.renderer.setRenderTarget(null);
+      img.dispose();
+      list.push({ config, starry: false, ref: rt.texture, plateRT: rt, frame });
+    }
+    plate.dispose();
+    return list;
+  }
+
+  /** Puts painting k of the gallery on the easel: its reference, mask, rank map and stroke ranks. */
+  _usePainting(k) {
+    const pt = this.gallery[k];
+    const G = CONFIG.GALLERY;
+    const RV = PROFILE.REVEAL;
+    this.paintingIndex = k;
+    this.pt = pt;
+    [this.maskRT, this.ref, this.rankTex, this.ranks, this.sortedRanks, this.starWindows] = [pt.maskRT, pt.ref, pt.rankTex, pt.ranks, pt.sortedRanks, pt.starWindows];
+    const attr = this.strokes.geometry.attributes.aRank;
+    attr.array.set(pt.ranks);
+    attr.needsUpdate = true;
+    const sk = this.strokeMat.uniforms; // (the top pass shares these uniform objects)
+    sk.tRef.value = pt.ref;
+    sk.tMask.value = pt.maskRT.texture;
+    const cu = this.canvasMat.uniforms;
+    cu.tRef.value = pt.ref;
+    cu.tMask.value = pt.maskRT.texture;
+    cu.tRank.value = pt.rankTex;
+    cu.uPrimerColor.value.set(pt.starry ? RV.PRIMER_COLOR : pt.config.primer);
+    cu.uSkyGround.value.set(pt.starry ? RV.SKY_GROUND : pt.config.ground);
+    cu.uLandGround.value.set(pt.starry ? RV.LAND_GROUND : G.WALL);
+    const lu = this.litMat.uniforms;
+    lu.tMask.value = pt.maskRT.texture;
+    lu.tRank.value = pt.rankTex;
+    this.litCover = -1;
+    const fu = this.flowMat.uniforms;
+    fu.tMask.value = pt.maskRT.texture;
+    fu.uWind.value = pt.starry ? 1 : G.WIND;
+    fu.uFlowGain.value = CONFIG.FLOW.GAIN * (pt.starry ? 1 : G.FLOW);
+    fu.uStarSwirl.value = pt.starry ? CONFIG.FLOW.STAR_SWIRL : 0;
+    fu.uMoonSwirl.value = pt.starry ? CONFIG.FLOW.MOON_SWIRL : 0;
+    // a new painting starts clean: no blooms or halos carried over
+    this.burstMat.uniforms.uBurstAmp.value.fill(0);
+    this.halo.fill(0);
+    this.haloTarget.fill(0);
+    this.snapCanvas = true;
+  }
+
+  /** The gallery painting on the easel at playhead t (score): the window it falls in. */
+  _paintingAt(t) {
+    const W = this.windows;
+    if (!W) return this.paintingIndex;
+    let k = 0;
+    while (k < W.length - 1 && t >= W[k + 1].a) k++;
+    return k;
+  }
+
+  /** The (unnormalised) loudness integral at playhead t. */
+  _cumAt(t) {
+    const C = this.cum;
+    const x = Math.min(C.length - 1, Math.max(0, t * this.curveRate));
+    const i = Math.min(C.length - 2, Math.floor(x));
+    return lerp(C[i], C[i + 1], x - i);
+  }
+
+  /** The coverage -> playhead table for painting k: when its strokes are painted. */
+  _fillInv(k) {
+    const inv = this.invTex.image.data;
+    const { a, done } = this.windows[k];
+    const ca = this._cumAt(a);
+    const span = Math.max(1e-6, this._cumAt(done) - ca);
+    const C = this.cum;
+    const r = this.curveRate;
+    const local = (j) => clamp01((C[j] - ca) / span);
+    const iEnd = Math.min(C.length - 1, Math.ceil(done * r) + 1);
+    let i = Math.max(0, Math.floor(a * r));
+    for (let b = 0; b < INV_BINS; b++) {
+      const c = b / (INV_BINS - 1);
+      while (i < iEnd - 1 && local(i + 1) < c) i++;
+      const x = local(i);
+      const y = local(i + 1);
+      inv[b] = Math.max(a, (i + (y > x ? clamp01((c - x) / (y - x)) : 0)) / r);
+    }
+    this.invTex.needsUpdate = true;
+    this.invPainting = k;
+  }
+
+  /**
    * coverage(t) for the piece: the integral of (MIN_RATE + loudness^EXPONENT),
    * the loudness smoothed over SMOOTH s, plus a short Gaussian burst at the
    * strongest bow attacks; normalised to 1 at COMPLETE_AT, 1 after. Then the
@@ -773,8 +1094,9 @@ export default class Scene3StarryNight extends SceneBase {
     if (!map) {
       inv.fill(1e9);
       this.curve = null;
+      this.windows = null;
       this.completeAt = Infinity;
-      this.live = { clock: 0, cover: 0, bin: 0, kick: 0, gesture: 0, lastGesture: -1e9 };
+      this.live = { clock: 0, cover: 0, bin: 0, kick: 0, gesture: 0, lastGesture: -1e9, index: 0 };
       return;
     }
     const n = map.level.length;
@@ -792,6 +1114,12 @@ export default class Scene3StarryNight extends SceneBase {
         sum += at(rate, i + rad + 1) - at(rate, i - rad);
       }
       rate = out;
+    }
+    // the gallery evens the pace toward its mean, so each painting takes its whole window
+    const steady = CONFIG.GALLERY.STEADY;
+    if (steady > 0) {
+      const mean = rate.reduce((a, b) => a + b, 0) / n;
+      rate = rate.map((v) => lerp(v, mean, steady));
     }
     // the strongest bow attacks: a bold gesture sweeps the next strokes in
     this.completeAt = this.completeAtFor(map);
@@ -815,26 +1143,33 @@ export default class Scene3StarryNight extends SceneBase {
     for (let i = 0; i < Math.min(n, Math.ceil(this.musicStart * r)); i++) rate[i] = 0;
     const C = new Float32Array(n);
     for (let i = 1; i < n; i++) C[i] = C[i - 1] + (0.5 * (rate[i - 1] + rate[i])) / r;
-    const x = Math.min(n - 1, this.completeAt * r);
-    const i0 = Math.floor(x);
-    const norm = lerp(C[i0], C[Math.min(n - 1, i0 + 1)], x - i0);
-    for (let i = 0; i < n; i++) C[i] = Math.min(1, C[i] / norm);
-    this.gestureShare = gestureArea / norm;
-    this.curve = C;
+    this.cum = C;
     this.curveRate = r;
-    let i = 0;
-    for (let k = 0; k < INV_BINS; k++) {
-      const c = k / (INV_BINS - 1);
-      while (i < n - 2 && C[i + 1] < c) i++;
-      const a = C[i];
-      const b = C[i + 1];
-      inv[k] = (i + (b > a ? clamp01((c - a) / (b - a)) : 0)) / r;
-    }
+    this.gestureShare = gestureArea / this._cumAt(this.completeAt);
+    // the gallery: equal windows from the first note to the end of the music (or the Starry Night's
+    // finish at the main climax); each painting is finished HOLD + FADE s before its window ends
+    // (the last one at completeAt, and it stays)
+    const Gal = CONFIG.GALLERY;
+    const N = this.gallery.length;
+    const L = (this.completeAt - this.musicStart) / N;
+    this.windows = this.gallery.map((_, k) => {
+      const a = this.musicStart + k * L;
+      return k === N - 1 ? { a, done: this.completeAt, end: Infinity } : { a, done: a + L - Gal.HOLD - Gal.FADE, end: a + L };
+    });
+    // the coverage of the painting on the easel at each moment (0 .. 1 in every window)
+    const spans = this.windows.map((w) => [this._cumAt(w.a), Math.max(1e-6, this._cumAt(w.done) - this._cumAt(w.a))]);
+    this.curve = Float32Array.from(C, (c, i) => {
+      const [ca, span] = spans[this._paintingAt(i / r)];
+      return clamp01((c - ca) / span);
+    });
+    this.invPainting = -1; // filled for the painting on the easel (update)
     this.curvePath = null;
   }
 
   /** When the painting is finished: COMPLETE_AT, else the main climax's peak. */
   completeAtFor(map) {
+    const Gal = CONFIG.GALLERY;
+    if (Gal.TO_MUSIC_END && Number.isFinite(this.musicEnd)) return Math.min(map.duration, this.musicEnd) - Gal.END_MARGIN;
     const main = this.climaxes.reduce((a, c) => (!a || c.weight >= a.weight ? c : a), null);
     return PROFILE.REVEAL.COMPLETE_AT ?? main?.peak ?? map.duration * 0.9;
   }
@@ -1097,6 +1432,12 @@ export default class Scene3StarryNight extends SceneBase {
       this.burstMat.uniforms.uBurstAmp.value.fill(0); // no blooms from before the seek on the new moment's canvas
     }
     if (score && this.revealKey !== [RV.MIN_RATE, RV.EXPONENT, RV.SMOOTH, RV.GESTURE.AMP, RV.GESTURE.WIDTH, RV.GESTURE.GAP, RV.COMPLETE_AT].join()) this._prepareReveal(); // a slider moved
+    // the gallery: which painting is on the easel (the playhead's window, or the live painter's turn)
+    const Gal = CONFIG.GALLERY;
+    const easel = score ? this._paintingAt(t) : this.live.index;
+    if (easel !== this.paintingIndex) this._usePainting(easel);
+    if (score && this.invPainting !== easel) this._fillInv(easel);
+    this.show = 1;
     let bloomAge = -1;
     if (this.revealSkip) {
       this.cover = 1;
@@ -1107,6 +1448,9 @@ export default class Scene3StarryNight extends SceneBase {
       this.revealNow = t;
       this.revealRate = (this.coverAt(t + 0.5) - this.coverAt(t - 0.5)) * 100;
       bloomAge = t - this.completeAt;
+      // a finished painting is shown HOLD s, then fades to black before the next one
+      const w = this.windows[easel];
+      if (w.end < Infinity) this.show = 1 - smoothstep(w.done + Gal.HOLD, w.end, t);
     } else {
       // live: the loudness paints it in about FALLBACK s; the strongest attacks add a bold gesture
       const Lv = this.live;
@@ -1120,7 +1464,7 @@ export default class Scene3StarryNight extends SceneBase {
       }
       Lv.gesture = follow(Lv.gesture, Lv.kick, G.WIDTH / 2);
       Lv.kick *= Math.exp(-dt / G.WIDTH);
-      const norm = RV.FALLBACK * (RV.MIN_RATE + RV.LIVE_LEVEL ** RV.EXPONENT);
+      const norm = Gal.LIVE * (RV.MIN_RATE + RV.LIVE_LEVEL ** RV.EXPONENT);
       const rate = ((RV.MIN_RATE + clamp01(drive) ** RV.EXPONENT) * presence + Lv.gesture) / norm;
       const was = Lv.cover;
       Lv.cover = Math.min(1, Lv.cover + rate * dt);
@@ -1133,7 +1477,17 @@ export default class Scene3StarryNight extends SceneBase {
       this.cover = Lv.cover;
       this.revealNow = Lv.clock;
       this.revealRate = rate * 100;
-      if (Lv.completeAt !== undefined) bloomAge = Lv.clock - Lv.completeAt;
+      if (Lv.completeAt !== undefined) {
+        if (this.pt.starry) bloomAge = Lv.clock - Lv.completeAt;
+        // finished: shown HOLD s, faded, then the next painting of the gallery (round and round)
+        const fadeAt = Lv.completeAt + Gal.HOLD;
+        this.show = 1 - smoothstep(fadeAt, fadeAt + Gal.FADE, Lv.clock);
+        if (Lv.clock >= fadeAt + Gal.FADE) {
+          Object.assign(Lv, { index: (Lv.index + 1) % this.gallery.length, cover: 0, bin: 0, completeAt: undefined });
+          inv.fill(1e9);
+          this.invTex.needsUpdate = true;
+        }
+      }
     }
     // golden light when the painting is finished
     const BL = RV.BLOOM;
@@ -1197,7 +1551,7 @@ export default class Scene3StarryNight extends SceneBase {
     const breathe = 1 + L.SPIRAL * this.lower;
     const turn = react(S.SPIRAL, x, R);
     const fu = this.flowMat.uniforms;
-    C.SPIRALS.forEach((s, i) => fu.uSpirals.value[i].set(s.u * this.paintAspect, s.v + this.lift, s.r * (i === 0 ? breathe : Math.sqrt(breathe)), s.strength * st8.spiral * turn));
+    C.SPIRALS.forEach((s, i) => fu.uSpirals.value[i].set(s.u * this.paintAspect, s.v + this.lift, s.r * (i === 0 ? breathe : Math.sqrt(breathe)), s.strength * st8.spiral * turn * (this.pt.starry ? 1 : 0)));
     fu.uStars.value[11].set(this.stars[11].x, this.stars[11].y + this.lift, this.stars[11].z);
     fu.uTime.value = this.time;
 
@@ -1285,7 +1639,8 @@ export default class Scene3StarryNight extends SceneBase {
     f.uClimax.value = this.climax;
     f.uWarmth.value = warmth;
     f.uCool.value.set(...W.COOL);
-    f.uCoolAmount.value = W.COOL_AMOUNT;
+    f.uCoolAmount.value = W.COOL_AMOUNT * (this.pt.starry ? 1 : Gal.COOL);
+    f.uShow.value = this.show;
     f.uGrade.value = W.GRADE;
     f.uHighlight.value = P.UPPER.HIGHLIGHT * this.upper;
     f.uTwinkle.value.set(P.UPPER.TWINKLE * this.upper, P.UPPER.TWINKLE_RATE);
@@ -1309,6 +1664,7 @@ export default class Scene3StarryNight extends SceneBase {
 
   /** A melody note: soft bright strokes and a swelling halo around the star at the note's height. */
   _melodyBloom(o, birth) {
+    if (!this.pt.starry) return; // the stars and the moon are the Starry Night's own
     const E = PROFILE.EVENTS;
     const amp = this.eventAmp;
     let i;
@@ -1339,6 +1695,7 @@ export default class Scene3StarryNight extends SceneBase {
 
   /** A strong bow attack: a faint ripple of sky strokes somewhere along the wind. */
   _ripple(o, birth) {
+    if (!this.pt.starry) return; // (a ripple of the Starry Night's wind)
     const E = PROFILE.EVENTS;
     const slot = this._nextBurst();
     const u = this.burstMat.uniforms;
@@ -1402,6 +1759,7 @@ export default class Scene3StarryNight extends SceneBase {
       light: { swatch: hex, text: `height ${this.melodyHeight.toFixed(2)} · tint ${this.tintAmount.toFixed(2)}` },
       events: `${this.events.blooms} blooms · ${this.events.ripples} ripples · ${this.events.waves} phrase waves`,
       strokes: `${Math.round(this.strokes.geometry.instanceCount * this.strokeMat.uniforms.uVisible.value)}`,
+      gallery: `${this.paintingIndex + 1} / ${this.gallery.length} · ${this.pt.config.name}${this.show < 0.999 ? ` · fading ${this.show.toFixed(2)}` : ''}`,
       painting: `${(this.cover * 100).toFixed(1)} % · ${this.stageName(this.cover)} · ${this.reveal.painted} / ${this.reveal.total} strokes · ${this.revealRate.toFixed(2)} %/s${this.bloom > 0.01 ? ` · bloom ${this.bloom.toFixed(2)}` : ''}${this.revealSkip ? ' · skipped (K)' : ''}`,
       coverage: { html: this._curveSvg() },
     };
@@ -1410,10 +1768,10 @@ export default class Scene3StarryNight extends SceneBase {
   /** The painter's stage(s) at coverage c. */
   stageName(c) {
     if (c >= 1) return 'finished';
-    const S = PROFILE.REVEAL.STAGES;
-    if (c < S.PRIMER[0]) return 'black';
+    const S = this.pt?.starry === false ? CONFIG.GALLERY.STAGES : PROFILE.REVEAL.STAGES;
+    if (S.PRIMER && c < S.PRIMER[0]) return 'black';
     const on = Object.entries(S).filter(([, [a, b]]) => c >= a && c < b);
-    return on.length ? on.map(([k]) => STAGE_NAMES[k] ?? k).join(' + ') : 'sky';
+    return on.length ? on.map(([k]) => STAGE_NAMES[k] ?? k.toLowerCase()).join(' + ') : 'sky';
   }
 
   /** A mini coverage curve over the piece with the playhead (D overlay). */
@@ -1462,7 +1820,11 @@ export default class Scene3StarryNight extends SceneBase {
     this.tune?.dispose();
     for (const t of [this.maskRT, this.flowRT, this.stateA, this.stateB, this.canvasA, this.canvasB, this.refRT, this.litRT]) t?.dispose();
     for (const m of [this.flowMat, this.stateMat, this.canvasMat, this.copyMat, this.finalMat, this.strokeMat, this.strokeMatTop, this.burstMat, this.litMat]) m?.dispose();
-    this.rankTex?.dispose();
+    for (const pt of this.gallery ?? []) {
+      pt.maskRT?.dispose();
+      pt.plateRT?.dispose();
+      pt.rankTex?.dispose();
+    }
     this.invTex?.dispose();
     this.strokes?.geometry.dispose();
     this.bursts?.geometry.dispose();
