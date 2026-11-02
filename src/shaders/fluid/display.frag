@@ -23,6 +23,7 @@ uniform vec3 cGold;
 uniform vec3 cGoldDeep;
 uniform float uSheen;     // gilded highlights, brighter when the music is loud
 uniform float uVibrance;  // chroma boost (1 = as stored)
+uniform float uFilter;    // 1 = keep colours inside the blue..purple / yellow bands, 0 = every hue
 uniform vec2 uDyeTexel;
 uniform float uAspect;
 uniform float uTime;
@@ -79,6 +80,7 @@ float hueDist(float h, float e) {
   return abs(mod(h - e + 540.0, 360.0) - 180.0);
 }
 vec3 toPalette(vec3 lab) {
+  if (uFilter < 0.5) return lab; // the colour sets (PROFILE.COLOURS) use every hue
   float c = length(lab.yz);
   if (c < GREY_C) return lab;
   float h = mod(degrees(atan(lab.z, lab.y)) + 360.0, 360.0);

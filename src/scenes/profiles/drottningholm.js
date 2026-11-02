@@ -29,6 +29,11 @@
  * deep in the night a climax flares blue-white instead (FLARE). Each section
  * also gets its own seeded choreography for the pours (CHOREO).
  *
+ * With COLOURS.ON (the default since 2026-11-02) the colours come from
+ * COLOURS.SETS instead: three vibrant colours at a time (pink, yellow, red;
+ * then green, yellow, purple ...), moving on to the next set with every new
+ * section. The journey then only shapes the motion.
+ *
  * Every constant is here; the ones in TUNE are live sliders (T, together
  * with the scene's own bloom sliders).
  */
@@ -124,6 +129,42 @@ export const PROFILE = {
   // share of notes that ignore the lightness window (bright accents), by journey [dawn, night]
   // they are cyan / ice white whatever their family
   ACCENT: { CHANCE: [0, 0.08], L: [0.66, 0.95], HUE: [218, 245], CHROMA: [0.04, 0.1] },
+
+  // Colour sets (user, 2026-11-02: "more vibrant, more colours, shifting between
+  // them: first pink, yellow and red, then green, yellow and purple ..."). When
+  // ON they replace the journey's blue / purple / yellow palette and its hue
+  // filter: every note takes one of the set's three colours (never the last
+  // note's), pours run through them by pitch, and each new section of the
+  // piece moves on to the next set (live input: every LIVE_EVERY s), cross-faded
+  // over BLEND s with a few WASHES so the canvas turns over. The journey still
+  // sets the fluid's feel (FEEL, FLOW, VIEW); the ground stays dark, tinted
+  // GROUND_TINT toward the set's first colour.
+  COLOURS: {
+    ON: true,
+    SETS: [
+      { name: 'rose', colours: ['#ff4fb0', '#ffd400', '#ff2a2a'] }, // pink, yellow, red
+      { name: 'garden', colours: ['#22e05a', '#ffe033', '#9a3cff'] }, // green, yellow, purple
+      { name: 'tropic', colours: ['#ff8a00', '#14e0d0', '#ff2fd0'] }, // orange, turquoise, magenta
+      { name: 'lagoon', colours: ['#2a7bff', '#b8ff2a', '#ff6a5a'] }, // blue, lime, coral
+      { name: 'jewel', colours: ['#7a3cff', '#ffb800', '#20d0ff'] }, // violet, gold, cyan
+      { name: 'carnival', colours: ['#ff2d55', '#00d68f', '#ffcc33'] }, // red, emerald, sun yellow
+    ],
+    BLEND: 4, // s cross-fade from one set to the next
+    LIVE_EVERY: 35, // s per set without a score (about one section)
+    WASHES: 4, // washes in the new colours when a set arrives
+    TURNOVER: 2.5, // × paint fading at the start of a cross-fade (back to 1 at its end): the old set clears out
+    VIBRANCE: 1.35, // display chroma boost (the journey palette used 1.15); keeps paint mixes from going muddy
+    // less dark (user, 2026-11-02: "sometimes too many dark colours"; was LIGHTNESS
+    // [0.8, 1.08], ground L [0.1, 0.2] at tint 0.35, full lacing, no exposure floor)
+    LIGHTNESS: [0.95, 1.12], // × the colour's own lightness, low notes -> high notes
+    CHROMA: 1.1, // × the colours' saturation
+    GOLD: 0.5, // × the gold layer (it is yellow, so it stays only as an accent)
+    GROUND_TINT: 0.6, // how far the ground leans toward the set's first colour ...
+    GROUND_L: [0.2, 0.32], // ... at this Oklab lightness [deep, light]: a dim colour, not near-black
+    LACE: 0.5, // × the dark veins between pours
+    EXPOSURE_FLOOR: 0.88, // quiet passages dim at most to this
+    FADE: 0.5, // × paint fading: paint stays longer and covers more of the canvas (the empty ground was most of the dark)
+  },
 
   // fluid character by journey, [dawn, night], linearly interpolated:
   // early thin, fast-spreading and airy; late thick, slow, heavy and swirling
@@ -228,6 +269,17 @@ export const TUNE = [
   ['BURST.PAINT', 'key burst paint', 0, 4, 0.05],
   ['BURST.PUSH.1', 'key burst push', 100, 800, 10],
   ['FINALE.RATE', 'finale pours / s', 0, 6, 0.1],
+  { group: 'colour sets' },
+  ['COLOURS.CHROMA', 'colour saturation ×', 0.5, 1.6, 0.05],
+  ['COLOURS.BLEND', 'set cross-fade (s)', 0.5, 15, 0.5],
+  ['COLOURS.LIVE_EVERY', 'live: s per set', 10, 120, 5],
+  ['COLOURS.GROUND_TINT', 'ground tint', 0, 1, 0.05],
+  ['COLOURS.GROUND_L.1', 'ground lightness', 0.05, 0.5, 0.01],
+  ['COLOURS.LIGHTNESS.0', 'low-note lightness ×', 0.6, 1.2, 0.01],
+  ['COLOURS.LACE', 'dark veins ×', 0, 1.5, 0.05],
+  ['COLOURS.FADE', 'paint fading ×', 0.2, 1.5, 0.05, 'lower = paint stays longer and covers more of the dark ground'],
+  ['COLOURS.EXPOSURE_FLOOR', 'quiet dimming floor', 0.5, 1, 0.01],
+  ['COLOURS.GOLD', 'gold layer ×', 0, 1.5, 0.05],
   { group: 'journey (dawn → night)' },
   ['JOURNEY.FORCE', 'pin journey (<0 = follow)', -0.01, 1, 0.01, 'preview one point of the arc; below 0 the music drives it'],
   ['JOURNEY.CLIMAX_LIFT', 'climax lift', 0, 0.4, 0.01, 'how far a climax lifts the journey back toward the light'],

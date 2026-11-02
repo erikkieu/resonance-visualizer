@@ -30,6 +30,10 @@ import displayFrag from '../shaders/fluid/display.frag?raw';
  *   splats -> curl -> vorticity confinement -> divergence ->
  *   pressure (Jacobi x20) -> gradient subtraction -> advection (velocity, dye)
  *
+ * Colour sets (PROFILE.COLOURS, on by default since 2026-11-02) override the
+ * palette below: three vibrant colours at a time that change with every
+ * section, with the hue filter off (_setColour, _updateSets).
+ *
  * Colour follows the melody: every pour takes its colour from COLOUR.RAMP at
  * the current audio.pitchHeight (low notes deep purple and navy, the middle
  * ocean and cyan, high notes light blue, mint and warm white), with a little
@@ -284,6 +288,7 @@ function srgbToOklab(r, g, b) {
  * display.frag applies the same rule to every pixel (paint mixes included).
  */
 function toPalette(L, A, B) {
+  if (PROFILE.COLOURS.ON) return [L, A, B]; // the colour sets use every hue
   const C = Math.hypot(A, B);
   if (C < PALETTE.GREY_CHROMA) return [L, A, B];
   const h = ((Math.atan2(B, A) * 180) / Math.PI + 360) % 360;
@@ -371,6 +376,11 @@ function buildRamp(stops) {
 
 // the journey's palette stops, each with its pitch ramp as a lookup table
 const STOPS = PROFILE.PALETTES.map((p) => ({ ...p, lut: buildRamp(p.ramp), groundCol: p.ground.map((hex) => new THREE.Color(hex)) }));
+
+// the colour sets (PROFILE.COLOURS), three Oklab colours each
+const hexToSrgb = (hex) => [0, 1, 2].map((i) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16) / 255);
+const SETS = PROFILE.COLOURS.SETS.map((s) => ({ name: s.name, lab: s.colours.map((hex) => srgbToOklab(...hexToSrgb(hex))) }));
+const linearToSrgb = (c) => (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055);
 
 /**
  * Monotone cubic (Fritsch-Carlson) through [x, y] keys, sampled at x: smooth
@@ -482,6 +492,11 @@ export default class Scene1Fluid extends SceneBase {
     this.choreo = { id: -1, type: 'orbit', seq: [], centre: [0.5, 0.5] };
     Object.assign(this.acc, { flow: 0, wash: 2, flare: 0 });
     this.pal = { lo: 0, hi: 0, f: 0 };
+    // colour sets: the current three colours (cross-faded) and which set is on
+    this.sets = { id: -1, index: 0, f: 1, from: SETS[0].lab, washes: 0, washIn: 0, changes: 0, turnover: 1 };
+    this.setLab = SETS[0].lab.map((c) => [...c]);
+    this.lastSetColour = -1;
+    this._groundTint = new THREE.Color();
     this.feel = {};
     this._applyJourney(this.journey);
   }
@@ -531,6 +546,7 @@ export default class Scene1Fluid extends SceneBase {
           cGoldDeep: { value: new THREE.Color(COLOUR.GOLD.DEEP) },
           uSheen: { value: 0 },
           uVibrance: { value: COLOUR.VIBRANCE },
+          uFilter: { value: PROFILE.COLOURS.ON ? 0 : 1 }, // the hue filter (off with the colour sets)
           uDyeTexel: { value: new THREE.Vector2() },
           uAspect: { value: 1 },
           uTime: { value: 0 },
@@ -686,6 +702,7 @@ export default class Scene1Fluid extends SceneBase {
    * inside the allowed hues.
    */
   _lab(jitter, height = this.height, tint = null) {
+    if (PROFILE.COLOURS.ON) return this._setColour(jitter, height, tint);
     if (tint?.lab) return toPalette(...tint.lab);
     const c = this._rampColour(height + jitter);
     let [L, A, B] = srgbToOklab(c[0], c[1], c[2]);
@@ -723,6 +740,14 @@ export default class Scene1Fluid extends SceneBase {
    */
   _nextTint() {
     if (Math.random() >= this.tune.values.hueVariety) return null;
+    if (PROFILE.COLOURS.ON) {
+      // one of the set's colours, never the last note's
+      const n = this.setLab.length;
+      let set = Math.floor(Math.random() * (this.lastSetColour < 0 ? n : n - 1));
+      if (this.lastSetColour >= 0 && set >= this.lastSetColour) set++;
+      this.lastSetColour = set;
+      return { set, family: 0, hue: 0, chroma: 0, accent: false };
+    }
     // the journey palette sets how often each family appears (more white at dawn, more purple at night)
     const options = PALETTE.FAMILIES.map((f, i) => (i === this.lastFamily ? 0 : f.weight * this.pal.families[i]));
     let r = Math.random() * options.reduce((a, b) => a + b, 0);
@@ -732,6 +757,68 @@ export default class Scene1Fluid extends SceneBase {
     const f = PALETTE.FAMILIES[family];
     const A = PROFILE.ACCENT;
     return { family, hue: rand(...f.hue), chroma: rand(...f.C), accent: Math.random() < this.pal.accent, accentHue: rand(...A.HUE), accentChroma: rand(...A.CHROMA) };
+  }
+
+  /**
+   * Oklab colour from the current colour set: a note's own colour (tint.set),
+   * otherwise the set colour for this pitch (low, middle, high third). The
+   * lightness follows the pitch around the colour's own, louder is more
+   * saturated; the flare keeps its brightness.
+   */
+  _setColour(jitter, height, tint) {
+    const C = PROFILE.COLOURS;
+    const h = clamp01(height + jitter);
+    const n = this.setLab.length;
+    const [L0, A0, B0] = this.setLab[tint?.set ?? Math.min(n - 1, Math.floor(h * n))];
+    const sat = C.CHROMA * lerp(COLOUR.LOUD_SATURATION[0], COLOUR.LOUD_SATURATION[1], this.loud);
+    let L = L0 * lerp(C.LIGHTNESS[0], C.LIGHTNESS[1], h);
+    if (tint?.lab) L = lerp(L, tint.lab[0], 0.5);
+    return [clamp01(L), A0 * sat, B0 * sat];
+  }
+
+  /**
+   * Colour sets (PROFILE.COLOURS): each section of the piece (live: every
+   * LIVE_EVERY s) moves on to the next set, cross-faded over BLEND s in
+   * Oklab with a few washes in the new colours; a seek lands on its
+   * section's set at once. Also tints the dark ground toward the set.
+   */
+  _updateSets(dt, perf, jumped) {
+    const C = PROFILE.COLOURS;
+    if (!C.ON) return;
+    const S = this.sets;
+    const id = this.scored ? perf.section?.index ?? 0 : Math.floor(this.realTime / C.LIVE_EVERY);
+    if (id !== S.id) {
+      const quiet = S.id < 0 || jumped;
+      S.from = this.setLab.map((c) => [...c]);
+      S.index = ((id % SETS.length) + SETS.length) % SETS.length;
+      S.id = id;
+      S.f = quiet ? 1 : 0;
+      if (!quiet) {
+        S.washes = C.WASHES;
+        S.washIn = 0.3;
+        S.changes++;
+      }
+    }
+    S.f = Math.min(1, S.f + dt / Math.max(0.1, C.BLEND));
+    const k = smoothstep(0, 1, S.f);
+    const to = SETS[S.index].lab;
+    this.setLab = S.from.map((c, i) => c.map((v, j) => lerp(v, to[i][j], k)));
+    // the old set's paint fades faster during the cross-fade, so the canvas turns over
+    S.turnover = lerp(C.TURNOVER, 1, S.f);
+    // the new colours sweep in, spread over the cross-fade
+    if (S.washes > 0 && (S.washIn -= dt) <= 0) {
+      this._wash(1.3);
+      S.washes--;
+      S.washIn = C.BLEND / Math.max(1, C.WASHES);
+    }
+    const u = this.mats?.display.uniforms;
+    if (!u) return;
+    u.uVibrance.value = C.VIBRANCE;
+    u.uLaceAmt.value = this.feel.LACE * C.LACE;
+    const [, a, b] = this.setLab[0];
+    const dark = (L) => this._groundTint.setRGB(...oklabToLinear(L, a * 0.5, b * 0.5));
+    u.cDeep.value.lerp(dark(C.GROUND_L[0]), C.GROUND_TINT);
+    u.cNavy.value.lerp(dark(C.GROUND_L[1]), C.GROUND_TINT);
   }
 
   // -------------------------------------------------------------- journey
@@ -785,6 +872,7 @@ export default class Scene1Fluid extends SceneBase {
     P.families = a.families.map((w, i) => lerp(w, b.families[i], f));
     for (const k of ['chroma', 'exposure', 'lace', 'vignette', 'gold', 'glow']) P[k] = lerp(a[k], b[k], f);
     P.accent = lerp(...PROFILE.ACCENT.CHANCE, j);
+    if (PROFILE.COLOURS.ON) P.gold *= PROFILE.COLOURS.GOLD; // gold is yellow: only an accent among the sets
     for (const [k, [dawn, night]] of Object.entries(PROFILE.FEEL)) this.feel[k] = lerp(dawn, night, j);
     const u = this.mats?.display.uniforms;
     if (!u) return;
@@ -1123,7 +1211,7 @@ export default class Scene1Fluid extends SceneBase {
     // 8. advect the paint (same dissipation on every channel keeps hues stable)
     adv.uVelocity.value = this.velocity.read.texture;
     adv.uSource.value = this.dye.read.texture;
-    adv.dissipation.value.setScalar(COLOUR.DYE_DISSIPATION * this.tune.values.fade * this.feel.DYE_FADE);
+    adv.dissipation.value.setScalar(COLOUR.DYE_DISSIPATION * this.tune.values.fade * this.feel.DYE_FADE * this.sets.turnover * (PROFILE.COLOURS.ON ? PROFILE.COLOURS.FADE : 1));
     pass.render(r, m.advection, this.dye.write);
     this.dye.swap();
 
@@ -1481,6 +1569,7 @@ export default class Scene1Fluid extends SceneBase {
     }
     // the journey first: it sets the palette, the fluid's feel and the clock's pace
     if (this._updateJourney(dt, audio, perf, jumped)) this._repaint();
+    this._updateSets(dt, perf, jumped);
     const sdt = this._advanceClock(dt, audio, jumped);
     this.realTime += dt;
     this._updateColourState(dt, audio);
@@ -1488,7 +1577,8 @@ export default class Scene1Fluid extends SceneBase {
     // early in the journey only partly, so the dawn canvas stays high-key
     const X = PROFILE.EXPOSURE;
     const dynamic = this.scored ? lerp(X.QUIET, X.LOUD, this.drive) * this.stage.exposure * lerp(1, X.CLIMAX, perf.climax) : 1;
-    const expTarget = lerp(1, dynamic, this.feel.EXPOSURE_RANGE) * this.pal.exposure;
+    let expTarget = lerp(1, dynamic, this.feel.EXPOSURE_RANGE) * this.pal.exposure;
+    if (PROFILE.COLOURS.ON) expTarget = Math.max(expTarget, PROFILE.COLOURS.EXPOSURE_FLOOR);
     this.exposure += (expTarget - this.exposure) * (jumped ? 1 : 1 - Math.exp(-dt / (expTarget > this.exposure ? X.ATTACK : X.RELEASE)));
     const t = this.time;
     const drive = this.drive;
@@ -1676,6 +1766,11 @@ export default class Scene1Fluid extends SceneBase {
       journey: `${this.journey.toFixed(3)}  (keys ${this.journeyBase.toFixed(3)} − lift ${this.lift.toFixed(3)})${this.flare > 0.01 ? ` · flare ${this.flare.toFixed(2)}` : ''}${PROFILE.JOURNEY.FORCE >= 0 ? ' · PINNED' : ''}`,
       palette: { html: `${palette} ground ${sw(ground[0], 10)}${sw(ground[1], 10)} ${STOPS[P.lo].name}→${STOPS[P.hi].name} ${(P.f * 100).toFixed(0)}%` },
       'journey arc': { html: this._journeySvg() },
+      ...(PROFILE.COLOURS.ON && {
+        'colour set': {
+          html: `${this.setLab.map((c) => sw(toHex(oklabToLinear(...c).map(linearToSrgb)))).join('')} ${SETS[this.sets.index].name} (${this.sets.index + 1}/${SETS.length}, section ${this.sets.id}) · ${(this.sets.f * 100).toFixed(0)}% · changes ${this.sets.changes}`,
+        },
+      }),
       choreography: `${this.choreo.type} (section ${this.choreo.id}) · flow ${(((this.flowAngle * 180) / Math.PI) % 360).toFixed(0)}° · zoom ${this.view.z.toFixed(3)} · repaints ${this.repaints}`,
       colour: { swatch: hex, text: `${hex}  at height ${this.height.toFixed(2)}` },
       'hue shift': `${this.hueShift >= 0 ? '+' : ''}${this.hueShift.toFixed(1)}°  (${NOTE_NAMES[this.note]})`,
